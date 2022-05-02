@@ -1,11 +1,10 @@
-use std::io::{Read, Write};
+use bendy::decoding::DictDecoder;
 use std::env;
 use std::fs;
+use std::io::{Read, Write};
 
-use bendy::decoding::{Error as DecodeError, ResultExt, FromBencode, Object};
-use bendy::encoding::{Error as EncodeError, AsString, ToBencode, SingleItemEncoder};
-
-
+use bendy::decoding::{Decoder, Error as DecodeError, FromBencode, Object, ResultExt};
+use bendy::encoding::{AsString, Error as EncodeError, SingleItemEncoder, ToBencode};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -13,7 +12,6 @@ fn main() {
 
     let tf = TorrentFile::from_bencode(&x).unwrap();
     println!("{:?}", tf);
-
 
     //plain tcp try
     /*println!("{:?}", "catfact.ninja:8000".to_socket_addrs().unwrap());
@@ -25,24 +23,10 @@ fn main() {
     println!("result = {}", result);
     println!("buf = {}", buf);*/
 
-
-    //ureq try
-    /*let body: String = ureq::get("https://catfact.ninja/fact")
-        .set("Example-Header", "header value")
-        .call().unwrap()
-        .into_string().unwrap();
-
-    let body: String = ureq::get(&(tf.announce+"ddddddd"))
-        .set("Example-Header", "header value")
-        .call().unwrap()
-        .into_string().unwrap();*/
-
-
-	let mut bytes: Vec<u8> = Vec::new();
+    let mut bytes: Vec<u8> = Vec::new();
     let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
         .set("Content-Type", "application/octet-stream")
         .call().unwrap()
-        //.into_string().unwrap();
 		.into_reader()
 	    .read_to_end(&mut bytes);
 
@@ -53,8 +37,9 @@ fn main() {
     //println!("{:?}", String::from_utf8_lossy(&tf.info.to_bencode().unwrap()));
 
     let mut file = std::fs::File::create("Ben.torrent").unwrap();
-	file.write_all(&tf.info.to_bencode().unwrap());
-
+    file.write_all(&tf.info.to_bencode().unwrap());
+    let mut file = std::fs::File::create("Profile.torrent").unwrap();
+    file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
 }
 
 #[derive(Debug)]
@@ -65,17 +50,96 @@ struct TorrentFile {
 
 #[derive(Debug)]
 struct Info {
+    file_duration: Vec<usize>, //?
+    file_media: Vec<usize>,    //?
     length: usize,
     name: String,
     piece_length: usize,
     pieces: Vec<u8>,
+    profiles: Vec<Profile>, //?
+}
+
+#[derive(Debug)]
+struct Profile {
+    acodec: String,
+    height: usize,
+    vcodec: String,
+    width: usize,
+}
+
+impl FromBencode for Profile {
+    fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
+        let mut acodec = None;
+        let mut height = None;
+        let mut vcodec = None;
+        let mut width = None;
+
+        let mut dict = object.try_into_dictionary()?;
+        while let Some(pair) = dict.next_pair()? {
+            match pair {
+                (b"acodec", value) => {
+                    acodec = String::decode_bencode_object(value)
+                        .context("acodec")
+                        .map(Some)?;
+                }
+                (b"height", value) => {
+                    height = usize::decode_bencode_object(value)
+                        .context("height")
+                        .map(Some)?;
+                }
+                (b"vcodec", value) => {
+                    vcodec = String::decode_bencode_object(value)
+                        .context("vcodec")
+                        .map(Some)?;
+                }
+                (b"width", value) => {
+                    width = usize::decode_bencode_object(value)
+                        .context("width")
+                        .map(Some)?;
+                }
+                (unknown_field, _) => {
+                    println!(
+                        "Not done in Profile - {:?}",
+                        String::from_utf8_lossy(unknown_field)
+                    );
+                }
+            }
+        }
+
+        let acodec = acodec.ok_or_else(|| DecodeError::missing_field("acodec"))?;
+        let height = height.ok_or_else(|| DecodeError::missing_field("height"))?;
+        let vcodec = vcodec.ok_or_else(|| DecodeError::missing_field("vcodec"))?;
+        let width = width.ok_or_else(|| DecodeError::missing_field("width"))?;
+
+        Ok(Profile {
+            acodec,
+            height,
+            vcodec,
+            width,
+        })
+    }
+}
+
+impl ToBencode for Profile {
+    const MAX_DEPTH: usize = 1;
+
+    fn encode(&self, encoder: SingleItemEncoder) -> Result<(), EncodeError> {
+        encoder.emit_dict(|mut e| {
+            e.emit_pair(b"acodec", &self.acodec)?;
+            e.emit_pair(b"height", &self.height)?;
+            e.emit_pair(b"vcodec", &self.vcodec)?;
+            e.emit_pair(b"width", &self.width)?;
+
+            Ok(())
+        })
+    }
 }
 
 #[derive(Debug)]
 struct TrackerResponse {
-	interval: usize,
-	min_interval: usize,
-	peers: Vec<u8>
+    interval: usize,
+    min_interval: usize,
+    peers: Vec<u8>,
 }
 
 impl FromBencode for TorrentFile {
@@ -98,7 +162,10 @@ impl FromBencode for TorrentFile {
                     info = Some(Info::from_bencode(i.unwrap()))
                 }
                 (unknown_field, _) => {
-                    println!("Not done in TorrentFile -{:?}", String::from_utf8_lossy(unknown_field));
+                    println!(
+                        "Not done in TorrentFile -{:?}",
+                        String::from_utf8_lossy(unknown_field)
+                    );
                     // return Err(DecodeError::unexpected_field(String::from_utf8_lossy(
                     //     unknown_field,
                     // )));
@@ -120,17 +187,28 @@ impl FromBencode for Info {
     //const EXPECTED_RECURSION_DEPTH: usize = 1;
 
     fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
+        let mut file_duration = None;
+        let mut file_media = None;
         let mut length = None;
         let mut name = None;
         let mut piece_length = None;
         let mut pieces = None;
+        let mut profiles = None;
 
         let mut dict = object.try_into_dictionary()?;
         while let Some(pair) = dict.next_pair()? {
             match pair {
-    			//"file-duration"
-				// "file-media"
-				// "profiles"
+                // "profiles"
+                (b"file-duration", value) => {
+                    file_duration = Vec::<usize>::decode_bencode_object(value)
+                        .context("file-duration")
+                        .map(Some)?;
+                }
+                (b"file-media", value) => {
+                    file_media = Vec::<usize>::decode_bencode_object(value)
+                        .context("file-media")
+                        .map(Some)?;
+                }
                 (b"length", value) => {
                     length = usize::decode_bencode_object(value)
                         .context("length")
@@ -150,45 +228,63 @@ impl FromBencode for Info {
                     //pieces is not human readable, so we can't put it to String
                     pieces = Some(value.try_into_bytes().unwrap().to_vec());
                 }
+                (b"profiles", value) => {
+                    profiles = Vec::<Profile>::decode_bencode_object(value)
+                        .context("profiles")
+                        .map(Some)?;
+                }
                 (unknown_field, _) => {
-                    println!("Not done in Info - {:?}", String::from_utf8_lossy(unknown_field));
+                    println!(
+                        "Not done in Info - {:?}",
+                        String::from_utf8_lossy(unknown_field)
+                    );
                 }
             }
         }
 
+        let file_duration =
+            file_duration.ok_or_else(|| DecodeError::missing_field("file_duration"))?;
+        let file_media = file_media.ok_or_else(|| DecodeError::missing_field("file_media"))?;
         let length = length.ok_or_else(|| DecodeError::missing_field("length"))?;
         let name = name.ok_or_else(|| DecodeError::missing_field("name"))?;
-        let piece_length = piece_length.ok_or_else(|| DecodeError::missing_field("piece_length"))?;
+        let piece_length =
+            piece_length.ok_or_else(|| DecodeError::missing_field("piece_length"))?;
         let pieces = pieces.ok_or_else(|| DecodeError::missing_field("pieces"))?;
+        let profiles = profiles.ok_or_else(|| DecodeError::missing_field("profiles"))?;
 
         Ok(Info {
+            file_duration,
+            file_media,
             length,
             name,
             piece_length,
             pieces,
+            profiles,
         })
     }
 }
 
 impl ToBencode for Info {
-    const MAX_DEPTH: usize = 2;
+    const MAX_DEPTH: usize = 3;
 
     fn encode(&self, encoder: SingleItemEncoder) -> Result<(), EncodeError> {
         encoder.emit_dict(|mut e| {
+            e.emit_pair(b"file-duration", &self.file_duration)?;
+            e.emit_pair(b"file-media", &self.file_media)?;
             e.emit_pair(b"length", &self.length)?;
-			e.emit_pair(b"name", &self.name)?;
-			e.emit_pair(b"piece length", &self.piece_length)?;
-			//Clone is expensive? TODO rewrite?
-			let pieces = ByteStringWrapper(self.pieces.clone());
-			e.emit_pair(b"pieces", pieces)?;
-
+            e.emit_pair(b"name", &self.name)?;
+            e.emit_pair(b"piece length", &self.piece_length)?;
+            //Clone is expensive? TODO rewrite?
+            let pieces = ByteStringWrapper(self.pieces.clone());
+            e.emit_pair(b"pieces", pieces)?;
+            e.emit_pair(b"profiles", &self.profiles)?;
             Ok(())
         })
     }
 }
 
 impl FromBencode for TrackerResponse {
-	fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
+    fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
         let mut interval = None;
         let mut min_interval = None;
         let mut peers = None;
@@ -211,23 +307,26 @@ impl FromBencode for TrackerResponse {
                     peers = Some(value.try_into_bytes().unwrap().to_vec());
                 }
                 (unknown_field, _) => {
-                    println!("Not done in TrackerResponse - {:?}", String::from_utf8_lossy(unknown_field));
+                    println!(
+                        "Not done in TrackerResponse - {:?}",
+                        String::from_utf8_lossy(unknown_field)
+                    );
                 }
             }
         }
 
         let interval = interval.ok_or_else(|| DecodeError::missing_field("interval"))?;
-        let min_interval = min_interval.ok_or_else(|| DecodeError::missing_field("min_interval"))?;
+        let min_interval =
+            min_interval.ok_or_else(|| DecodeError::missing_field("min_interval"))?;
         let peers = peers.ok_or_else(|| DecodeError::missing_field("peers"))?;
 
         Ok(TrackerResponse {
             interval,
             min_interval,
-            peers
+            peers,
         })
     }
 }
-
 
 struct ByteStringWrapper(Vec<u8>);
 
