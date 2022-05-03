@@ -1,45 +1,58 @@
+use bendy::decoding::Decoder;
 use bendy::decoding::DictDecoder;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
 
-use bendy::decoding::{Decoder, Error as DecodeError, FromBencode, Object, ResultExt};
+use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
 use bendy::encoding::{AsString, Error as EncodeError, SingleItemEncoder, ToBencode};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     let x = fs::read(&args[1]).unwrap();
 
-    let tf = TorrentFile::from_bencode(&x).unwrap();
-    println!("{:?}", tf);
+    //let tf = TorrentFile::from_bencode(&x).unwrap();
+    //println!("{:?}", tf);
 
-    //plain tcp try
-    /*println!("{:?}", "catfact.ninja:8000".to_socket_addrs().unwrap());
-    let mut stream = TcpStream::connect("catfact.ninja:8000").unwrap();
-    let _res = stream.write(b"GET /fact HTTP/1.1\r\nUserAgent: poop\r\nConnection: close\r\n\r\n");
+    //THIS WORKS! Takes the whole info bencode without bullshit structs
+    let mut decoder = Decoder::new(&x);
+    match decoder.next_object().unwrap() {
+        Some(Object::Dict(mut d)) => {
+            println!("{:?}", d);
+            let mut file = std::fs::File::create("Object.torrent").unwrap();
+            loop {
+                match d.next_pair().unwrap() {
+                    Some(x) => {
+                        if x.0 == b"info" {
+                            file.write_all(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
+                        }
+                    }
+                    None => break,
+                }
+            }
+            //file.write_all(.unwrap().1.try_into_dictionary().unwrap().into_raw().unwrap());
+        }
+        _ => println!("Something is terribly wrong with torrent file"),
+    };
 
-    let mut buf = String::new();
-    let result = stream.read_to_string(&mut buf).unwrap();
-    println!("result = {}", result);
-    println!("buf = {}", buf);*/
+    return;
+    /*
+
 
     let mut bytes: Vec<u8> = Vec::new();
     let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
         .set("Content-Type", "application/octet-stream")
         .call().unwrap()
-		.into_reader()
-	    .read_to_end(&mut bytes);
-
-    //println!("{:?}", body);
+        .into_reader()
+        .read_to_end(&mut bytes);
     let respone = TrackerResponse::from_bencode(&bytes).unwrap();
-    //println!("{:?}", respone);
-    //println!("{:?}", String::from_utf8_lossy(&x));
-    //println!("{:?}", String::from_utf8_lossy(&tf.info.to_bencode().unwrap()));
 
     let mut file = std::fs::File::create("Ben.torrent").unwrap();
     file.write_all(&tf.info.to_bencode().unwrap());
     let mut file = std::fs::File::create("Profile.torrent").unwrap();
     file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
+
+    */
 }
 
 #[derive(Debug)]
