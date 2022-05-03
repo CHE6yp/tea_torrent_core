@@ -23,10 +23,10 @@ fn main() {
     let mut bytes: Vec<u8> = Vec::new();
     // let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
     let url = format!("{}&info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
-	    	tf.announce,
-	    	hash_string,
-	    	tf.info.length
-    	);
+            tf.announce,
+            hash_string,
+            tf.info.length
+        );
     let _body = ureq::get(&url)
         .set("Content-Type", "application/octet-stream")
         .call()
@@ -35,6 +35,17 @@ fn main() {
         .read_to_end(&mut bytes);
     let respone = TrackerResponse::from_bencode(&bytes).unwrap();
     println!("{:?}", respone);
+    println!("{:?}", &respone.peers.len());
+    for i in (0..respone.peers.len()).step_by(6) {
+        println!(
+            "{}.{}.{}.{}:{}",
+            respone.peers[i],
+            respone.peers[i + 1],
+            respone.peers[i + 2],
+            respone.peers[i + 3],
+            ((respone.peers[i + 4] as u32) << 8) + respone.peers[i + 5] as u32
+        );
+    }
 
     // let mut file = std::fs::File::create("Ben.torrent").unwrap();
     // file.write_all(&tf.info.to_bencode().unwrap());
@@ -53,28 +64,10 @@ fn get_info_hash_encoded(bencode: &[u8]) -> String {
                         let mut hasher = Sha1::new();
                         hasher.update(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
                         let hexes = hasher.finalize();
-                        let hash = format!("%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}", 
-                        			&hexes[0],
-                        			&hexes[1],
-                        			&hexes[2],
-                        			&hexes[3],
-                        			&hexes[4],
-                        			&hexes[5],
-                        			&hexes[6],
-                        			&hexes[7],
-                        			&hexes[8],
-                        			&hexes[9],
-                        			&hexes[10],
-                        			&hexes[11],
-                        			&hexes[12],
-                        			&hexes[13],
-                        			&hexes[14],
-                        			&hexes[15],
-                        			&hexes[16],
-                        			&hexes[17],
-                        			&hexes[18],
-                        			&hexes[19],
-                        		);
+                        let mut hash = String::new();
+                        for i in 0..20 {
+                            hash += &format!("%{:02X}", &hexes[i]);
+                        }
                         return hash;
                     }
                 }
@@ -93,13 +86,13 @@ struct TorrentFile {
 
 #[derive(Debug)]
 struct Info {
-    file_duration: Vec<usize>, //?
-    file_media: Vec<usize>,    //?
+    //file_duration: Vec<usize>, //?
+    //file_media: Vec<usize>,    //?
     length: usize,
     name: String,
     piece_length: usize,
     pieces: Vec<u8>,
-    profiles: Vec<Profile>, //?
+    //profiles: Vec<Profile>, //?
 }
 
 #[derive(Debug)]
@@ -285,24 +278,24 @@ impl FromBencode for Info {
             }
         }
 
-        let file_duration =
-            file_duration.ok_or_else(|| DecodeError::missing_field("file_duration"))?;
-        let file_media = file_media.ok_or_else(|| DecodeError::missing_field("file_media"))?;
+        //let file_duration =
+        //    file_duration.ok_or_else(|| DecodeError::missing_field("file_duration"))?;
+        //let file_media = file_media.ok_or_else(|| DecodeError::missing_field("file_media"))?;
         let length = length.ok_or_else(|| DecodeError::missing_field("length"))?;
         let name = name.ok_or_else(|| DecodeError::missing_field("name"))?;
         let piece_length =
             piece_length.ok_or_else(|| DecodeError::missing_field("piece_length"))?;
         let pieces = pieces.ok_or_else(|| DecodeError::missing_field("pieces"))?;
-        let profiles = profiles.ok_or_else(|| DecodeError::missing_field("profiles"))?;
+        //let profiles = profiles.ok_or_else(|| DecodeError::missing_field("profiles"))?;
 
         Ok(Info {
-            file_duration,
-            file_media,
+            //file_duration,
+            //file_media,
             length,
             name,
             piece_length,
             pieces,
-            profiles,
+            //profiles,
         })
     }
 }
@@ -312,15 +305,15 @@ impl ToBencode for Info {
 
     fn encode(&self, encoder: SingleItemEncoder) -> Result<(), EncodeError> {
         encoder.emit_dict(|mut e| {
-            e.emit_pair(b"file-duration", &self.file_duration)?;
-            e.emit_pair(b"file-media", &self.file_media)?;
+            //e.emit_pair(b"file-duration", &self.file_duration)?;
+            //e.emit_pair(b"file-media", &self.file_media)?;
             e.emit_pair(b"length", &self.length)?;
             e.emit_pair(b"name", &self.name)?;
             e.emit_pair(b"piece length", &self.piece_length)?;
             //Clone is expensive? TODO rewrite?
             let pieces = ByteStringWrapper(self.pieces.clone());
             e.emit_pair(b"pieces", pieces)?;
-            e.emit_pair(b"profiles", &self.profiles)?;
+            //e.emit_pair(b"profiles", &self.profiles)?;
             Ok(())
         })
     }
