@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 bendy = "^0.3"
 ureq = "2.4.0"
+sha1 = "^0.10"

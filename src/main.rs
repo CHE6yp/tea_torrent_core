@@ -1,5 +1,6 @@
 use bendy::decoding::Decoder;
-use bendy::decoding::DictDecoder;
+use std::error::Error;
+
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -7,52 +8,81 @@ use std::io::{Read, Write};
 use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
 use bendy::encoding::{AsString, Error as EncodeError, SingleItemEncoder, ToBencode};
 
+use sha1::{Digest, Sha1};
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let x = fs::read(&args[1]).unwrap();
 
-    //let tf = TorrentFile::from_bencode(&x).unwrap();
+    let tf = TorrentFile::from_bencode(&x).unwrap();
     //println!("{:?}", tf);
 
-    //THIS WORKS! Takes the whole info bencode without bullshit structs
-    let mut decoder = Decoder::new(&x);
-    match decoder.next_object().unwrap() {
-        Some(Object::Dict(mut d)) => {
-            println!("{:?}", d);
-            let mut file = std::fs::File::create("Object.torrent").unwrap();
-            loop {
-                match d.next_pair().unwrap() {
-                    Some(x) => {
-                        if x.0 == b"info" {
-                            file.write_all(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
-                        }
-                    }
-                    None => break,
-                }
-            }
-            //file.write_all(.unwrap().1.try_into_dictionary().unwrap().into_raw().unwrap());
-        }
-        _ => println!("Something is terribly wrong with torrent file"),
-    };
-
-    return;
-    /*
-
+    let hash_string = get_info_hash_encoded(&x);
+    println!("{:?}", hash_string);
 
     let mut bytes: Vec<u8> = Vec::new();
-    let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
+    // let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
+    let url = format!("{}&info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
+	    	tf.announce,
+	    	hash_string,
+	    	tf.info.length
+    	);
+    let _body = ureq::get(&url)
         .set("Content-Type", "application/octet-stream")
-        .call().unwrap()
+        .call()
+        .unwrap()
         .into_reader()
         .read_to_end(&mut bytes);
     let respone = TrackerResponse::from_bencode(&bytes).unwrap();
+    println!("{:?}", respone);
 
-    let mut file = std::fs::File::create("Ben.torrent").unwrap();
-    file.write_all(&tf.info.to_bencode().unwrap());
-    let mut file = std::fs::File::create("Profile.torrent").unwrap();
-    file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
+    // let mut file = std::fs::File::create("Ben.torrent").unwrap();
+    // file.write_all(&tf.info.to_bencode().unwrap());
+    // let mut file = std::fs::File::create("Profile.torrent").unwrap();
+    // file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
+}
 
-    */
+fn get_info_hash_encoded(bencode: &[u8]) -> String {
+    //THIS WORKS! Takes the whole info bencode without bullshit structs
+    let mut decoder = Decoder::new(bencode);
+    match decoder.next_object().unwrap() {
+        Some(Object::Dict(mut d)) => loop {
+            match d.next_pair().unwrap() {
+                Some(x) => {
+                    if x.0 == b"info" {
+                        let mut hasher = Sha1::new();
+                        hasher.update(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
+                        let hexes = hasher.finalize();
+                        let hash = format!("%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}%{:02x}", 
+                        			&hexes[0],
+                        			&hexes[1],
+                        			&hexes[2],
+                        			&hexes[3],
+                        			&hexes[4],
+                        			&hexes[5],
+                        			&hexes[6],
+                        			&hexes[7],
+                        			&hexes[8],
+                        			&hexes[9],
+                        			&hexes[10],
+                        			&hexes[11],
+                        			&hexes[12],
+                        			&hexes[13],
+                        			&hexes[14],
+                        			&hexes[15],
+                        			&hexes[16],
+                        			&hexes[17],
+                        			&hexes[18],
+                        			&hexes[19],
+                        		);
+                        return hash;
+                    }
+                }
+                None => panic!("Wrong torrent file: no Info dictionary"),
+            }
+        },
+        _ => panic!("Wrong torrent file: not a dictionary at top level"),
+    };
 }
 
 #[derive(Debug)]
