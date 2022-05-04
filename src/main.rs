@@ -1,9 +1,10 @@
 use bendy::decoding::Decoder;
-use std::error::Error;
+use std::time::Duration;
 
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
+use std::net::TcpStream;
 
 use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
 use bendy::encoding::{AsString, Error as EncodeError, SingleItemEncoder, ToBencode};
@@ -17,14 +18,14 @@ fn main() {
     let tf = TorrentFile::from_bencode(&x).unwrap();
     //println!("{:?}", tf);
 
-    let hash_string = get_info_hash_encoded(&x);
-    println!("{:?}", hash_string);
+    let info_hash = InfoHash::new(&x);
+    println!("{:?}", info_hash);
 
     let mut bytes: Vec<u8> = Vec::new();
     // let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
     let url = format!("{}&info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
             tf.announce,
-            hash_string,
+            &info_hash.as_string_url_encoded(),
             tf.info.length
         );
     let _body = ureq::get(&url)
@@ -35,7 +36,8 @@ fn main() {
         .read_to_end(&mut bytes);
     let respone = TrackerResponse::from_bencode(&bytes).unwrap();
     println!("{:?}", respone);
-    println!("{:?}", &respone.peers.len());
+
+    //Print peers ip
     for i in (0..respone.peers.len()).step_by(6) {
         println!(
             "{}.{}.{}.{}:{}",
@@ -43,39 +45,102 @@ fn main() {
             respone.peers[i + 1],
             respone.peers[i + 2],
             respone.peers[i + 3],
-            ((respone.peers[i + 4] as u32) << 8) + respone.peers[i + 5] as u32
+            ((respone.peers[i + 4] as u16) << 8) + respone.peers[i + 5] as u16
         );
     }
+    println!("=================");
+    for i in (0..respone.peers.len()).step_by(6) {
+        println!(
+            "Trying {}.{}.{}.{}:{}",
+            respone.peers[i],
+            respone.peers[i + 1],
+            respone.peers[i + 2],
+            respone.peers[i + 3],
+            ((respone.peers[i + 4] as u16) << 8) + respone.peers[i + 5] as u16
+        );
+        let stream = TcpStream::connect_timeout(
+            &std::net::SocketAddr::from((
+                [
+                    respone.peers[i],
+                    respone.peers[i + 1],
+                    respone.peers[i + 2],
+                    respone.peers[i + 3],
+                ],
+                ((respone.peers[i + 4] as u16) << 8) + respone.peers[i + 5] as u16,
+            )),
+            Duration::from_secs(2),
+        );
+        if let Ok(mut s) = stream {
+            let mut arr = vec![19];
+            arr.extend(b"BitTorrent protocol");
+            arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
+            arr.extend(info_hash.raw());
+            arr.extend(b"-TE0001-004815162342"); //12 rand numbers at the end TODO
+            s.write(&arr); //28
+            let mut resp = [0; 64];
+            s.read(&mut resp);
+            println!("{:?}", s);
+            println!("{:?}", resp);
+            println!("{:?}", String::from_utf8_lossy(&resp));
+        } else {
+            println!("Failed!");
+        }
+    }
 
-    // let mut file = std::fs::File::create("Ben.torrent").unwrap();
-    // file.write_all(&tf.info.to_bencode().unwrap());
+    let mut file = std::fs::File::create("Ben.torrent").unwrap();
+    file.write_all(&tf.info.to_bencode().unwrap()).unwrap();
     // let mut file = std::fs::File::create("Profile.torrent").unwrap();
     // file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
 }
 
-fn get_info_hash_encoded(bencode: &[u8]) -> String {
-    //THIS WORKS! Takes the whole info bencode without bullshit structs
-    let mut decoder = Decoder::new(bencode);
-    match decoder.next_object().unwrap() {
-        Some(Object::Dict(mut d)) => loop {
-            match d.next_pair().unwrap() {
-                Some(x) => {
-                    if x.0 == b"info" {
-                        let mut hasher = Sha1::new();
-                        hasher.update(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
-                        let hexes = hasher.finalize();
-                        let mut hash = String::new();
-                        for i in 0..20 {
-                            hash += &format!("%{:02X}", &hexes[i]);
+#[derive(Debug)]
+struct InfoHash {
+    hash: [u8; 20],
+}
+
+impl InfoHash {
+    fn new(bencode: &[u8]) -> InfoHash {
+        //THIS WORKS! Takes the whole info bencode without bullshit structs
+        let mut decoder = Decoder::new(bencode);
+        match decoder.next_object().unwrap() {
+            Some(Object::Dict(mut d)) => loop {
+                match d.next_pair().unwrap() {
+                    Some(x) => {
+                        if x.0 == b"info" {
+                            let mut hasher = Sha1::new();
+                            hasher.update(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
+                            let hexes = hasher.finalize();
+                            return InfoHash {
+                                hash: hexes.try_into().expect("Wrong length"),
+                            };
                         }
-                        return hash;
                     }
+                    None => panic!("Wrong torrent file: no Info dictionary"),
                 }
-                None => panic!("Wrong torrent file: no Info dictionary"),
-            }
-        },
-        _ => panic!("Wrong torrent file: not a dictionary at top level"),
-    };
+            },
+            _ => panic!("Wrong torrent file: not a dictionary at top level"),
+        };
+    }
+
+    fn raw(&self) -> &[u8] {
+        return &self.hash;
+    }
+
+    fn as_string(&self) -> String {
+        let mut hash = String::new();
+        for i in 0..20 {
+            hash += &format!("{:02X}", &self.hash[i]);
+        }
+        return hash;
+    }
+
+    fn as_string_url_encoded(&self) -> String {
+        let mut hash = String::new();
+        for i in 0..20 {
+            hash += &format!("%{:02X}", &self.hash[i]);
+        }
+        return hash;
+    }
 }
 
 #[derive(Debug)]
@@ -223,28 +288,28 @@ impl FromBencode for Info {
     //const EXPECTED_RECURSION_DEPTH: usize = 1;
 
     fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
-        let mut file_duration = None;
-        let mut file_media = None;
+        // let mut file_duration = None;
+        // let mut file_media = None;
         let mut length = None;
         let mut name = None;
         let mut piece_length = None;
         let mut pieces = None;
-        let mut profiles = None;
+        // let mut profiles = None;
 
         let mut dict = object.try_into_dictionary()?;
         while let Some(pair) = dict.next_pair()? {
             match pair {
                 // "profiles"
-                (b"file-duration", value) => {
-                    file_duration = Vec::<usize>::decode_bencode_object(value)
-                        .context("file-duration")
-                        .map(Some)?;
-                }
-                (b"file-media", value) => {
-                    file_media = Vec::<usize>::decode_bencode_object(value)
-                        .context("file-media")
-                        .map(Some)?;
-                }
+                // (b"file-duration", value) => {
+                //     file_duration = Vec::<usize>::decode_bencode_object(value)
+                //         .context("file-duration")
+                //         .map(Some)?;
+                // }
+                // (b"file-media", value) => {
+                //     file_media = Vec::<usize>::decode_bencode_object(value)
+                //         .context("file-media")
+                //         .map(Some)?;
+                // }
                 (b"length", value) => {
                     length = usize::decode_bencode_object(value)
                         .context("length")
@@ -264,11 +329,11 @@ impl FromBencode for Info {
                     //pieces is not human readable, so we can't put it to String
                     pieces = Some(value.try_into_bytes().unwrap().to_vec());
                 }
-                (b"profiles", value) => {
-                    profiles = Vec::<Profile>::decode_bencode_object(value)
-                        .context("profiles")
-                        .map(Some)?;
-                }
+                // (b"profiles", value) => {
+                //     profiles = Vec::<Profile>::decode_bencode_object(value)
+                //         .context("profiles")
+                //         .map(Some)?;
+                // }
                 (unknown_field, _) => {
                     println!(
                         "Not done in Info - {:?}",
