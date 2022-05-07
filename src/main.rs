@@ -1,3 +1,5 @@
+use ureq::Response;
+
 use bendy::decoding::Decoder;
 use std::time::Duration;
 
@@ -19,25 +21,43 @@ fn main() {
     //println!("{:?}", tf);
 
     let info_hash = InfoHash::new(&x);
-    println!("{:?}", info_hash);
+    //println!("{:?}", info_hash);
 
-    let mut bytes: Vec<u8> = Vec::new();
-    // let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
-    let url = format!("{}&info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
-            tf.announce,
-            &info_hash.as_string_url_encoded(),
-            tf.info.length
-        );
-    let _body = ureq::get(&url)
-        .set("Content-Type", "application/octet-stream")
-        .call()
-        .unwrap()
-        .into_reader()
-        .read_to_end(&mut bytes);
-    let respone = TrackerResponse::from_bencode(&bytes).unwrap();
+    //test_trackers(&tf, &info_hash);
+    let mut resp = None;
+    if let Ok(r) = connect_to_tracker(&tf.announce, &info_hash, tf.info.length) {
+        resp = Some(r);
+    } else {
+        println!("Connection to {} failed", &tf.announce);
+        println!();
+        println!("Trying backup trackers");
+        for tracker in trackers() {
+            println!("Trying {}", tracker);
+            if let Ok(r) = connect_to_tracker(&tracker, &info_hash, tf.info.length) {
+                resp = Some(r);
+                break;
+            }
+        }
+    }
+    if let None = resp  {
+        panic!("Sorry!");
+    }
+    let respone = get_peers(resp.unwrap()).unwrap();
     println!("{:?}", respone);
 
+
+    //test_connect_peer(&info_hash);
     //Print peers ip
+    connect_to_peers(respone, &info_hash);
+    
+
+    let mut file = std::fs::File::create("Ben.torrent").unwrap();
+    file.write_all(&tf.info.to_bencode().unwrap()).unwrap();
+    // let mut file = std::fs::File::create("Profile.torrent").unwrap();
+    // file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
+}
+
+fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash) {
     for i in (0..respone.peers.len()).step_by(6) {
         println!(
             "{}.{}.{}.{}:{}",
@@ -77,20 +97,111 @@ fn main() {
             arr.extend(info_hash.raw());
             arr.extend(b"-TE0001-004815162342"); //12 rand numbers at the end TODO
             s.write(&arr); //28
-            let mut resp = [0; 64];
-            s.read(&mut resp);
             println!("{:?}", s);
-            println!("{:?}", resp);
-            println!("{:?}", String::from_utf8_lossy(&resp));
+            println!("{:?}", &arr);
+            let mut resp = [0; 64];
+            loop {
+                s.read(&mut resp);
+                println!("{:?}", resp);
+                println!("{:?}", String::from_utf8_lossy(&resp));
+            }
         } else {
             println!("Failed!");
         }
     }
+}
 
-    let mut file = std::fs::File::create("Ben.torrent").unwrap();
-    file.write_all(&tf.info.to_bencode().unwrap()).unwrap();
-    // let mut file = std::fs::File::create("Profile.torrent").unwrap();
-    // file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
+//BACKUP TRACKERS!!!
+fn trackers() -> [String;25]
+{
+    [
+        "http://tracker.files.fm:6969/announce".to_string(),
+        "https://tr.abiir.top:443/announce".to_string(), //best amount of peers!!!
+        "http://tracker.mywaifu.best:6969/announce".to_string(),
+        "https://tracker.nanoha.org:443/announce".to_string(),
+        "http://tracker2.ctix.cn:6969/announce".to_string(),
+        "http://t.overflow.biz:6969/announce".to_string(),
+        "https://tracker.babico.name.tr:443/announce".to_string(),
+        "http://bt.okmp3.ru:2710/announce".to_string(),
+        "https://track.plop.pm:8989/announce".to_string(), //?? gave localhost as peer
+        "http://tracker.openbittorrent.com:80/announce".to_string(),
+
+        //failed
+        "https://tracker.lilithraws.cf:443/announce".to_string(),        
+        "http://ipv6.govt.hu:6969/announce".to_string(),
+        "http://open.acgnxtracker.com:80/announce".to_string(),
+        "http://t.publictracker.xyz:6969/announce".to_string(),
+        "https://tr.burnabyhighstar.com:443/announce".to_string(),
+        "http://ipv6.1337.cx:6969/announce".to_string(),
+        "http://i-p-v-6.tk:6969/announce".to_string(),
+        "http://tracker.ipv6tracker.ru:80/announce".to_string(),
+        "http://tracker.k.vu:6969/announce".to_string(),
+        "http://t.nyaatracker.com:80/announce".to_string(),
+        "http://t.acg.rip:6699/announce".to_string(),
+        "https://tracker.iriseden.fr:443/announce".to_string(),
+        "http://tracker.gbitt.info:80/announce".to_string(),
+        "https://chihaya-heroku.120181311.xyz:443/announce".to_string(),
+        "https://opentracker.i2p.rocks:443/announce".to_string(),
+    ]
+}
+
+fn test_connect_peer(info_hash: &InfoHash)
+{
+    println!( "Test connect!!! 83.173.200.87:45585");
+    let stream = TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([83,173,200,87], 45585)),
+        Duration::from_secs(2),
+    );
+    if let Ok(mut s) = stream {
+        let mut arr = vec![19];
+        arr.extend(b"BitTorrent protocol");
+        arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
+        arr.extend(info_hash.raw());
+        arr.extend(b"-TE0001-004815162342"); //12 rand numbers at the end TODO
+        s.write(&arr); //28
+        println!("{:?}", s);
+        println!("{:?}", &arr);
+        let mut resp = [0; 64];
+        loop {
+            s.read(&mut resp);
+            println!("{:?}", resp);
+            println!("{:?}", String::from_utf8_lossy(&resp));
+        }
+    }
+}
+
+fn test_trackers(tf:&TorrentFile, ih: &InfoHash)
+{
+    println!("Test tracker list\r\n");
+    for i in trackers() {
+        println!("{:?}", i);
+        let resp = connect_to_tracker(&i, &ih, tf.info.length).unwrap();
+        let tr = get_peers(resp);
+        println!("{:?}\r\n", tr);
+    }
+}
+
+fn get_peers(resp: Response) -> Result<TrackerResponse, DecodeError> {
+    let mut bytes: Vec<u8> = Vec::new();
+
+    resp.into_reader()
+        .read_to_end(&mut bytes);
+    Ok(TrackerResponse::from_bencode(&bytes)?)
+}
+
+fn connect_to_tracker(announce: &str, info_hash: &InfoHash, length: usize) -> Result<Response, ureq::Error> {
+    
+    // let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
+    let url = format!("{}{}info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
+            announce,
+            if announce.contains("?") {"&"} else {"?"},
+            info_hash.as_string_url_encoded(),
+            length
+        );
+    let _body = ureq::get(&url)
+        .set("Content-Type", "application/octet-stream")
+        .call();
+    _body
 }
 
 #[derive(Debug)]
@@ -149,7 +260,7 @@ struct TorrentFile {
     info: Info,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Info {
     //file_duration: Vec<usize>, //?
     //file_media: Vec<usize>,    //?
