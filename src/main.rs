@@ -1,3 +1,4 @@
+
 use ureq::Response;
 
 use bendy::decoding::Decoder;
@@ -18,15 +19,13 @@ fn main() {
     let x = fs::read(&args[1]).unwrap();
 
     let tf = TorrentFile::from_bencode(&x).unwrap();
-    //println!("{:?}", tf);
 
     let info_hash = InfoHash::new(&x);
-    //println!("{:?}", info_hash);
 
-    //test_trackers(&tf, &info_hash);
-    let mut resp = None;
     if let Ok(r) = connect_to_tracker(&tf.announce, &info_hash, tf.info.length) {
-        resp = Some(r);
+        let respone = get_peers(r).unwrap();
+        println!("{:?}", respone);
+        connect_to_peers(respone, &info_hash);
     } else {
         println!("Connection to {} failed", &tf.announce);
         println!();
@@ -34,22 +33,13 @@ fn main() {
         for tracker in trackers() {
             println!("Trying {}", tracker);
             if let Ok(r) = connect_to_tracker(&tracker, &info_hash, tf.info.length) {
-                resp = Some(r);
-                break;
+                let respone = get_peers(r).unwrap();
+                println!("{:?}", respone);
+
+                connect_to_peers(respone, &info_hash);
             }
         }
     }
-    if let None = resp  {
-        panic!("Sorry!");
-    }
-    let respone = get_peers(resp.unwrap()).unwrap();
-    println!("{:?}", respone);
-
-
-    //test_connect_peer(&info_hash);
-    //Print peers ip
-    connect_to_peers(respone, &info_hash);
-    
 
     let mut file = std::fs::File::create("Ben.torrent").unwrap();
     file.write_all(&tf.info.to_bencode().unwrap()).unwrap();
@@ -96,14 +86,56 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash) {
             arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
             arr.extend(info_hash.raw());
             arr.extend(b"-TE0001-004815162342"); //12 rand numbers at the end TODO
-            s.write(&arr); //28
-            println!("{:?}", s);
-            println!("{:?}", &arr);
-            let mut resp = [0; 64];
+            s.write(&arr).expect("Couldn't write buffer; Handshake"); //28
+
+            //reading handshake
+            let mut handshake_buff = [0u8; 68];
+            s.read(&mut handshake_buff).expect("Couldn't read buffer; Handshake");
+            println!("{:?}", handshake_buff);
+            println!("{:?}", String::from_utf8_lossy(&handshake_buff));
+
+            //reading actuall data
             loop {
-                s.read(&mut resp);
-                println!("{:?}", resp);
-                println!("{:?}", String::from_utf8_lossy(&resp));
+                let mut message_size = [0u8; 4];
+                s.read(&mut message_size).expect("Couldn't read buffer");
+                let message_size = big_endian_to_u32(&message_size);
+                //println!("message size {:?}", message_size);
+
+                if message_size == 0 {
+                    println!("keep alive");
+                    continue;
+                }
+
+                let mut message_buf = vec![0u8; message_size as usize];
+                s.read_exact(&mut message_buf).expect("Couldn't read buffer");
+                /*
+                    keep-alive: <len=0000>
+                    choke: <len=0001><id=0>
+                    unchoke: <len=0001><id=1>
+                    interested: <len=0001><id=2>
+                    not interested: <len=0001><id=3>
+                    have: <len=0005><id=4><piece index>
+                    bitfield: <len=0001+X><id=5><bitfield>
+                    request: <len=0013><id=6><index><begin><length>
+                    piece: <len=0009+X><id=7><index><begin><block>
+                    cancel: <len=0013><id=8><index><begin><length>
+                    port: <len=0003><id=9><listen-port>
+                */
+                match &message_buf[0] {
+                    0 => println!("choke"),
+                    1 => println!("unchoke"),
+                    2 => println!("interested"),
+                    3 => println!("not interested"),
+                    4 => println!("have"),
+                    5 => println!("bitfield"),
+                    6 => println!("request"),
+                    7 => println!("piece"),
+                    8 => println!("cancel"),
+                    9 => println!("port"),
+                    _ => println!("WHAT?!"),
+                }
+
+                println!("{:?}", message_buf);
             }
         } else {
             println!("Failed!");
@@ -111,12 +143,18 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash) {
     }
 }
 
+fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
+    ((value[0] as u32) << 24)
+        + ((value[1] as u32) << 16)
+        + ((value[2] as u32) << 8)
+        + value[3] as u32
+}
+
 //BACKUP TRACKERS!!!
-fn trackers() -> [String;25]
-{
+fn trackers() -> [String; 25] {
     [
-        "http://tracker.files.fm:6969/announce".to_string(),
         "https://tr.abiir.top:443/announce".to_string(), //best amount of peers!!!
+        "http://tracker.files.fm:6969/announce".to_string(),
         "http://tracker.mywaifu.best:6969/announce".to_string(),
         "https://tracker.nanoha.org:443/announce".to_string(),
         "http://tracker2.ctix.cn:6969/announce".to_string(),
@@ -125,9 +163,8 @@ fn trackers() -> [String;25]
         "http://bt.okmp3.ru:2710/announce".to_string(),
         "https://track.plop.pm:8989/announce".to_string(), //?? gave localhost as peer
         "http://tracker.openbittorrent.com:80/announce".to_string(),
-
         //failed
-        "https://tracker.lilithraws.cf:443/announce".to_string(),        
+        "https://tracker.lilithraws.cf:443/announce".to_string(),
         "http://ipv6.govt.hu:6969/announce".to_string(),
         "http://open.acgnxtracker.com:80/announce".to_string(),
         "http://t.publictracker.xyz:6969/announce".to_string(),
@@ -145,53 +182,18 @@ fn trackers() -> [String;25]
     ]
 }
 
-fn test_connect_peer(info_hash: &InfoHash)
-{
-    println!( "Test connect!!! 83.173.200.87:45585");
-    let stream = TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([83,173,200,87], 45585)),
-        Duration::from_secs(2),
-    );
-    if let Ok(mut s) = stream {
-        let mut arr = vec![19];
-        arr.extend(b"BitTorrent protocol");
-        arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
-        arr.extend(info_hash.raw());
-        arr.extend(b"-TE0001-004815162342"); //12 rand numbers at the end TODO
-        s.write(&arr); //28
-        println!("{:?}", s);
-        println!("{:?}", &arr);
-        let mut resp = [0; 64];
-        loop {
-            s.read(&mut resp);
-            println!("{:?}", resp);
-            println!("{:?}", String::from_utf8_lossy(&resp));
-        }
-    }
-}
-
-fn test_trackers(tf:&TorrentFile, ih: &InfoHash)
-{
-    println!("Test tracker list\r\n");
-    for i in trackers() {
-        println!("{:?}", i);
-        let resp = connect_to_tracker(&i, &ih, tf.info.length).unwrap();
-        let tr = get_peers(resp);
-        println!("{:?}\r\n", tr);
-    }
-}
-
 fn get_peers(resp: Response) -> Result<TrackerResponse, DecodeError> {
     let mut bytes: Vec<u8> = Vec::new();
 
-    resp.into_reader()
-        .read_to_end(&mut bytes);
+    resp.into_reader().read_to_end(&mut bytes)?;
     Ok(TrackerResponse::from_bencode(&bytes)?)
 }
 
-fn connect_to_tracker(announce: &str, info_hash: &InfoHash, length: usize) -> Result<Response, ureq::Error> {
-    
-    // let body = ureq::get("http://bt4.t-ru.org/ann?pk=81d1bedc2cf1de678b0887c7619f6d45&info_hash=%2awMG%81C%9d%a5%8e%a2%11%0bEsM%8f%c5%80%cd%cd&port=50658&uploaded=0&downloaded=0&left=1566951424&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1")
+fn connect_to_tracker(
+    announce: &str,
+    info_hash: &InfoHash,
+    length: usize,
+) -> Result<Response, ureq::Error> {
     let url = format!("{}{}info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
             announce,
             if announce.contains("?") {"&"} else {"?"},
@@ -205,153 +207,9 @@ fn connect_to_tracker(announce: &str, info_hash: &InfoHash, length: usize) -> Re
 }
 
 #[derive(Debug)]
-struct InfoHash {
-    hash: [u8; 20],
-}
-
-impl InfoHash {
-    fn new(bencode: &[u8]) -> InfoHash {
-        //THIS WORKS! Takes the whole info bencode without bullshit structs
-        let mut decoder = Decoder::new(bencode);
-        match decoder.next_object().unwrap() {
-            Some(Object::Dict(mut d)) => loop {
-                match d.next_pair().unwrap() {
-                    Some(x) => {
-                        if x.0 == b"info" {
-                            let mut hasher = Sha1::new();
-                            hasher.update(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
-                            let hexes = hasher.finalize();
-                            return InfoHash {
-                                hash: hexes.try_into().expect("Wrong length"),
-                            };
-                        }
-                    }
-                    None => panic!("Wrong torrent file: no Info dictionary"),
-                }
-            },
-            _ => panic!("Wrong torrent file: not a dictionary at top level"),
-        };
-    }
-
-    fn raw(&self) -> &[u8] {
-        return &self.hash;
-    }
-
-    fn as_string(&self) -> String {
-        let mut hash = String::new();
-        for i in 0..20 {
-            hash += &format!("{:02X}", &self.hash[i]);
-        }
-        return hash;
-    }
-
-    fn as_string_url_encoded(&self) -> String {
-        let mut hash = String::new();
-        for i in 0..20 {
-            hash += &format!("%{:02X}", &self.hash[i]);
-        }
-        return hash;
-    }
-}
-
-#[derive(Debug)]
 struct TorrentFile {
     announce: String,
     info: Info,
-}
-
-#[derive(Debug, Clone)]
-struct Info {
-    //file_duration: Vec<usize>, //?
-    //file_media: Vec<usize>,    //?
-    length: usize,
-    name: String,
-    piece_length: usize,
-    pieces: Vec<u8>,
-    //profiles: Vec<Profile>, //?
-}
-
-#[derive(Debug)]
-struct Profile {
-    acodec: String,
-    height: usize,
-    vcodec: String,
-    width: usize,
-}
-
-impl FromBencode for Profile {
-    fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
-        let mut acodec = None;
-        let mut height = None;
-        let mut vcodec = None;
-        let mut width = None;
-
-        let mut dict = object.try_into_dictionary()?;
-        while let Some(pair) = dict.next_pair()? {
-            match pair {
-                (b"acodec", value) => {
-                    acodec = String::decode_bencode_object(value)
-                        .context("acodec")
-                        .map(Some)?;
-                }
-                (b"height", value) => {
-                    height = usize::decode_bencode_object(value)
-                        .context("height")
-                        .map(Some)?;
-                }
-                (b"vcodec", value) => {
-                    vcodec = String::decode_bencode_object(value)
-                        .context("vcodec")
-                        .map(Some)?;
-                }
-                (b"width", value) => {
-                    width = usize::decode_bencode_object(value)
-                        .context("width")
-                        .map(Some)?;
-                }
-                (unknown_field, _) => {
-                    println!(
-                        "Not done in Profile - {:?}",
-                        String::from_utf8_lossy(unknown_field)
-                    );
-                }
-            }
-        }
-
-        let acodec = acodec.ok_or_else(|| DecodeError::missing_field("acodec"))?;
-        let height = height.ok_or_else(|| DecodeError::missing_field("height"))?;
-        let vcodec = vcodec.ok_or_else(|| DecodeError::missing_field("vcodec"))?;
-        let width = width.ok_or_else(|| DecodeError::missing_field("width"))?;
-
-        Ok(Profile {
-            acodec,
-            height,
-            vcodec,
-            width,
-        })
-    }
-}
-
-impl ToBencode for Profile {
-    const MAX_DEPTH: usize = 1;
-
-    fn encode(&self, encoder: SingleItemEncoder) -> Result<(), EncodeError> {
-        encoder.emit_dict(|mut e| {
-            e.emit_pair(b"acodec", &self.acodec)?;
-            e.emit_pair(b"height", &self.height)?;
-            e.emit_pair(b"vcodec", &self.vcodec)?;
-            e.emit_pair(b"width", &self.width)?;
-
-            Ok(())
-        })
-    }
-}
-
-#[derive(Debug)]
-struct TrackerResponse {
-    interval: usize,
-    min_interval: usize,
-    peers: Vec<u8>,
 }
 
 impl FromBencode for TorrentFile {
@@ -393,6 +251,17 @@ impl FromBencode for TorrentFile {
 
         Ok(TorrentFile { announce, info })
     }
+}
+
+#[derive(Debug, Clone)]
+struct Info {
+    //file_duration: Vec<usize>, //?
+    //file_media: Vec<usize>,    //?
+    length: usize,
+    name: String,
+    piece_length: usize,
+    pieces: Vec<u8>,
+    //profiles: Vec<Profile>, //?
 }
 
 impl FromBencode for Info {
@@ -493,6 +362,139 @@ impl ToBencode for Info {
             Ok(())
         })
     }
+}
+
+#[derive(Debug)]
+struct InfoHash {
+    hash: [u8; 20],
+}
+
+impl InfoHash {
+    fn new(bencode: &[u8]) -> InfoHash {
+        //THIS WORKS! Takes the whole info bencode without bullshit structs
+        let mut decoder = Decoder::new(bencode);
+        match decoder.next_object().unwrap() {
+            Some(Object::Dict(mut d)) => loop {
+                match d.next_pair().unwrap() {
+                    Some(x) => {
+                        if x.0 == b"info" {
+                            let mut hasher = Sha1::new();
+                            hasher.update(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
+                            let hexes = hasher.finalize();
+                            return InfoHash {
+                                hash: hexes.try_into().expect("Wrong length"),
+                            };
+                        }
+                    }
+                    None => panic!("Wrong torrent file: no Info dictionary"),
+                }
+            },
+            _ => panic!("Wrong torrent file: not a dictionary at top level"),
+        };
+    }
+
+    fn raw(&self) -> &[u8] {
+        return &self.hash;
+    }
+
+    fn as_string(&self) -> String {
+        let mut hash = String::new();
+        for i in 0..20 {
+            hash += &format!("{:02X}", &self.hash[i]);
+        }
+        return hash;
+    }
+
+    fn as_string_url_encoded(&self) -> String {
+        let mut hash = String::new();
+        for i in 0..20 {
+            hash += &format!("%{:02X}", &self.hash[i]);
+        }
+        return hash;
+    }
+}
+
+#[derive(Debug)]
+struct Profile {
+    acodec: String,
+    height: usize,
+    vcodec: String,
+    width: usize,
+}
+
+impl FromBencode for Profile {
+    fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
+        let mut acodec = None;
+        let mut height = None;
+        let mut vcodec = None;
+        let mut width = None;
+
+        let mut dict = object.try_into_dictionary()?;
+        while let Some(pair) = dict.next_pair()? {
+            match pair {
+                (b"acodec", value) => {
+                    acodec = String::decode_bencode_object(value)
+                        .context("acodec")
+                        .map(Some)?;
+                }
+                (b"height", value) => {
+                    height = usize::decode_bencode_object(value)
+                        .context("height")
+                        .map(Some)?;
+                }
+                (b"vcodec", value) => {
+                    vcodec = String::decode_bencode_object(value)
+                        .context("vcodec")
+                        .map(Some)?;
+                }
+                (b"width", value) => {
+                    width = usize::decode_bencode_object(value)
+                        .context("width")
+                        .map(Some)?;
+                }
+                (unknown_field, _) => {
+                    println!(
+                        "Not done in Profile - {:?}",
+                        String::from_utf8_lossy(unknown_field)
+                    );
+                }
+            }
+        }
+
+        let acodec = acodec.ok_or_else(|| DecodeError::missing_field("acodec"))?;
+        let height = height.ok_or_else(|| DecodeError::missing_field("height"))?;
+        let vcodec = vcodec.ok_or_else(|| DecodeError::missing_field("vcodec"))?;
+        let width = width.ok_or_else(|| DecodeError::missing_field("width"))?;
+
+        Ok(Profile {
+            acodec,
+            height,
+            vcodec,
+            width,
+        })
+    }
+}
+
+impl ToBencode for Profile {
+    const MAX_DEPTH: usize = 1;
+
+    fn encode(&self, encoder: SingleItemEncoder) -> Result<(), EncodeError> {
+        encoder.emit_dict(|mut e| {
+            e.emit_pair(b"acodec", &self.acodec)?;
+            e.emit_pair(b"height", &self.height)?;
+            e.emit_pair(b"vcodec", &self.vcodec)?;
+            e.emit_pair(b"width", &self.width)?;
+
+            Ok(())
+        })
+    }
+}
+
+#[derive(Debug)]
+struct TrackerResponse {
+    interval: usize,
+    min_interval: usize,
+    peers: Vec<u8>,
 }
 
 impl FromBencode for TrackerResponse {
