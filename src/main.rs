@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use ureq::Response;
 
 use bendy::decoding::Decoder;
@@ -18,13 +19,17 @@ fn main() {
     let x = fs::read(&args[1]).unwrap();
 
     let tf = TorrentFile::from_bencode(&x).unwrap();
+    println!("{:?}", tf);
 
     let info_hash = InfoHash::new(&x);
 
     if let Ok(r) = connect_to_tracker(&tf.announce, &info_hash, tf.info.length) {
         let respone = get_peers(r).unwrap();
-        println!("{:?}", respone);
-        connect_to_peers(respone, &info_hash);
+        println!(
+            "Connection to {:?} complete, connecting to peers",
+            &tf.announce
+        );
+        connect_to_peers(respone, &info_hash, &tf);
     } else {
         println!("Connection to {} failed", &tf.announce);
         println!();
@@ -33,9 +38,9 @@ fn main() {
             println!("Trying {}", tracker);
             if let Ok(r) = connect_to_tracker(&tracker, &info_hash, tf.info.length) {
                 let respone = get_peers(r).unwrap();
-                println!("{:?}", respone);
+                println!("Connection to {:?} complete, connecting to peers", &tracker);
 
-                connect_to_peers(respone, &info_hash);
+                connect_to_peers(respone, &info_hash, &tf);
             }
         }
     }
@@ -46,7 +51,7 @@ fn main() {
     // file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
 }
 
-fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash) {
+fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file: &TorrentFile) {
     for i in (0..respone.peers.len()).step_by(6) {
         println!(
             "{}.{}.{}.{}:{}",
@@ -109,27 +114,44 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash) {
             }
 
             //reading actuall data
-            s.set_read_timeout(Some(Duration::from_secs(5)));
+            s.set_read_timeout(Some(Duration::from_secs(15)));
             let mut peer_status = (true, false, true, false); //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
+
+            let mut pn = 0;
+            // let pl: u32 = 65536;
+            // let pl: u32 = 4096;
+            let pl: u32 = torrent_file.info.piece_length as u32;
+            let mut offset: u32 = 0;
+            let mut file = OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(format!("downloads/{}", &torrent_file.info.name))
+                .unwrap();
+            //let mut piece = vec![];
+
             loop {
                 let mut message_size = [0u8; 4];
                 let package_size = s.read(&mut message_size);
                 match package_size {
                     Ok(package_size) => println!("package_size {}", package_size),
-                    Err(_) => {
-                        println!("No package for 5 secs;");
+                    Err(e) => {
+                        println!("No package for 5 secs; {}", e);
                         if peer_status.2 == true {
                             println!("Sending unchoke and interested");
                             s.write(&[0, 0, 0, 1, 1]); //send unchoke
+                            peer_status.0 = false;
                             s.write(&[0, 0, 0, 1, 2]); //send interested
+                            peer_status.1 = true;
+                        } else {
+                            println!("Send keep-alive");
+                            s.write(&[0, 0, 0, 0]);
+                            //s.write(&[0, 0, 0, 13, 6, 0,0,0,1, 0,0,0,0, 0,0,0,255 ]);
                         }
-                        continue;
                     }
                 }
 
                 let message_size = big_endian_to_u32(&message_size);
                 //println!("message size {:?}", message_size);
-
                 if message_size == 0 {
                     println!("keep alive");
                     continue;
@@ -155,8 +177,11 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash) {
                 match &message_buf[0] {
                     0 => {
                         println!("choke");
+                        peer_status.2 = true;
                         s.write(&[0, 0, 0, 1, 1]); //send unchoke
                         s.write(&[0, 0, 0, 1, 2]); //send interested
+                        peer_status.0 = false;
+                        peer_status.1 = true;
                     }
                     1 => {
                         println!("unchoke");
@@ -167,10 +192,45 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash) {
                     4 => println!("have"),
                     5 => println!("bitfield"),
                     6 => println!("request"),
-                    7 => println!("piece"),
+                    7 => {
+                        println!("piece");
+                        file.write(&message_buf[9..=message_size as usize - 1]);
+                    }
                     8 => println!("cancel"),
                     9 => println!("port"),
                     _ => println!("WHAT?!"),
+                }
+
+                //continue;
+                //request pieces if we are unchoked
+
+                //request 256 pieces
+                // let mut pn = 0;
+                // let pl = 255;
+                // let mut offset = 0;
+                if peer_status.2 == false && pn != 256 {
+                    println!("Requesting piece");
+                    println!("piece_length {:?}", torrent_file.info.piece_length);
+                    let be_length = (torrent_file.info.piece_length as u32).to_be_bytes();
+                    println!("piece_length BE {:?}", be_length);
+                    let be_pl = pl.to_be_bytes();
+
+                    let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
+                    request_message.append(&mut vec![0, 0, 0, pn as u8]); //piece number
+                                                                          // request_message.append(&mut vec![0,0,0,0]); //piece uhh, offset?
+                    let be_offset = offset.to_be_bytes();
+                    request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
+                                                                     // request_message.append(&mut vec![be_length[0],be_length[1],be_length[2],be_length[3]]); //piece length
+
+                    request_message.append(&mut be_pl.to_vec()); //piece length
+                    println!("\nRequesting {:?}\n", &request_message);
+                    s.write(&request_message);
+                    offset += pl;
+                    if torrent_file.info.piece_length as u32 <= offset {
+                        pn += 1;
+                        offset = 0;
+                        //check piece
+                    }
                 }
             }
         } else {
