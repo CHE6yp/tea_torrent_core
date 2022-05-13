@@ -133,7 +133,7 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                 let mut message_size = [0u8; 4];
                 let package_size = s.read(&mut message_size);
                 match package_size {
-                    Ok(package_size) => println!("package_size {}", package_size),
+                    Ok(package_size) => (), //println!("package_size {}", package_size),
                     Err(e) => {
                         println!("No package for 5 secs; {}", e);
                         if peer_status.2 == true {
@@ -153,7 +153,7 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                 let message_size = big_endian_to_u32(&message_size);
                 //println!("message size {:?}", message_size);
                 if message_size == 0 {
-                    println!("keep alive");
+                    //println!("keep alive");
                     continue;
                 }
 
@@ -173,7 +173,6 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                     cancel: <len=0013><id=8><index><begin><length>
                     port: <len=0003><id=9><listen-port>
                 */
-                println!("{:?}", message_buf);
                 match &message_buf[0] {
                     0 => {
                         println!("choke");
@@ -189,11 +188,19 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                     }
                     2 => println!("interested"),
                     3 => println!("not interested"),
-                    4 => println!("have"),
-                    5 => println!("bitfield"),
+                    4 => println!("have\n {:?}", &message_buf[1..=message_size as usize - 1]),
+                    5 => println!(
+                        "bitfield\n {:?}",
+                        &message_buf[1..=message_size as usize - 1]
+                    ),
                     6 => println!("request"),
                     7 => {
-                        println!("piece");
+                        println!(
+                            "piece {} of {}, offset {}",
+                            big_endian_to_u32(&message_buf[1..5].try_into().unwrap()),
+                            torrent_file.info.length / torrent_file.info.piece_length,
+                            big_endian_to_u32(&message_buf[5..9].try_into().unwrap())
+                        );
                         file.write(&message_buf[9..=message_size as usize - 1]);
                     }
                     8 => println!("cancel"),
@@ -208,12 +215,23 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                 // let mut pn = 0;
                 // let pl = 255;
                 // let mut offset = 0;
-                if peer_status.2 == false && pn != 256 {
+                let block_size: u32 = 16384; //16Kb more than that doesn't work somehow, BEP 52 or something,
+                if peer_status.2 == false
+                    && pn != torrent_file.info.length / torrent_file.info.piece_length
+                {
                     println!("Requesting piece");
-                    println!("piece_length {:?}", torrent_file.info.piece_length);
-                    let be_length = (torrent_file.info.piece_length as u32).to_be_bytes();
-                    println!("piece_length BE {:?}", be_length);
+
+                    println!("length {:?}", torrent_file.info.length);
+                    let be_length = (torrent_file.info.length as u32).to_be_bytes();
+                    println!("length BE {:?}", be_length);
+
+                    println!("piece_length {:?}", pl);
                     let be_pl = pl.to_be_bytes();
+                    println!("piece_length BE {:?}", be_pl);
+
+                    println!("piece_fraction {:?}", block_size);
+                    let be_block_size = block_size.to_be_bytes();
+                    println!("piece_fraction BE {:?}", be_block_size);
 
                     let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
                     request_message.append(&mut vec![0, 0, 0, pn as u8]); //piece number
@@ -222,11 +240,11 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                     request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
                                                                      // request_message.append(&mut vec![be_length[0],be_length[1],be_length[2],be_length[3]]); //piece length
 
-                    request_message.append(&mut be_pl.to_vec()); //piece length
+                    request_message.append(&mut be_block_size.to_vec()); //piece length
                     println!("\nRequesting {:?}\n", &request_message);
                     s.write(&request_message);
-                    offset += pl;
-                    if torrent_file.info.piece_length as u32 <= offset {
+                    offset += block_size;
+                    if pl <= offset {
                         pn += 1;
                         offset = 0;
                         //check piece
