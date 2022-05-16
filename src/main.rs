@@ -1,7 +1,7 @@
+use std::fmt;
 use std::fs::OpenOptions;
 use ureq::Response;
 
-use bendy::decoding::Decoder;
 use std::time::Duration;
 
 use std::env;
@@ -19,30 +19,30 @@ fn main() {
     let x = fs::read(&args[1]).unwrap();
 
     let tf = TorrentFile::from_bencode(&x).unwrap();
-    println!("{:?}", tf);
+    println!("\n{}\n", tf);
 
-    let info_hash = InfoHash::new(&x);
-
-    if let Ok(r) = connect_to_tracker(&tf.announce, &info_hash, tf.info.length) {
+    if let Ok(r) = connect_to_tracker(&tf) {
         let respone = get_peers(r).unwrap();
         println!(
             "Connection to {:?} complete, connecting to peers",
             &tf.announce
         );
-        connect_to_peers(respone, &info_hash, &tf);
+        connect_to_peers(respone, &tf);
     } else {
         println!("Connection to {} failed", &tf.announce);
-        println!();
+        //TODO make backup trackers work!
+        /*println!();
         println!("Trying backup trackers");
         for tracker in trackers() {
             println!("Trying {}", tracker);
-            if let Ok(r) = connect_to_tracker(&tracker, &info_hash, tf.info.length) {
+            // if let Ok(r) = connect_to_tracker(&tf) {
+            if let Ok(r) = connect_to_tracker(&TorrentFile{announce: tracker, info: tf.info, info_hash: tf.info_hash}) {
                 let respone = get_peers(r).unwrap();
                 println!("Connection to {:?} complete, connecting to peers", &tracker);
 
-                connect_to_peers(respone, &info_hash, &tf);
+                connect_to_peers(respone, &tf);
             }
-        }
+        }*/
     }
 
     let mut file = std::fs::File::create("Ben.torrent").unwrap();
@@ -51,7 +51,7 @@ fn main() {
     // file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
 }
 
-fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file: &TorrentFile) {
+fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
     for i in (0..respone.peers.len()).step_by(6) {
         println!(
             "{}.{}.{}.{}:{}",
@@ -89,7 +89,7 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
             let mut arr = vec![19];
             arr.extend(b"BitTorrent protocol");
             arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
-            arr.extend(info_hash.raw());
+            arr.extend(tf.info_hash.raw());
             arr.extend(b"-tT0001-004815162342"); //12 rand numbers at the end TODO
             s.write(&arr).expect("Couldn't write buffer; Handshake"); //28
 
@@ -103,12 +103,12 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                 String::from_utf8_lossy(&handshake_buff[1..20]),
                 &handshake_buff[20..28],
                 String::from_utf8_lossy(&handshake_buff[28..48]),
-                String::from_utf8_lossy(info_hash.raw()),
+                String::from_utf8_lossy(tf.info_hash.raw()),
                 String::from_utf8_lossy(&handshake_buff[48..68]),
                 try_parse_client(&handshake_buff[48..68])
             );
 
-            if &handshake_buff[28..48] != info_hash.raw() {
+            if &handshake_buff[28..48] != tf.info_hash.raw() {
                 println!("Invalid info hash!");
                 continue;
             }
@@ -120,12 +120,12 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
             let mut pn = 0;
             // let pl: u32 = 65536;
             // let pl: u32 = 4096;
-            let pl: u32 = torrent_file.info.piece_length as u32;
+            let pl: u32 = tf.info.piece_length as u32;
             let mut offset: u32 = 0;
             let mut file = OpenOptions::new()
                 .append(true)
                 .create(true)
-                .open(format!("downloads/{}", &torrent_file.info.name))
+                .open(format!("downloads/{}", &tf.info.name))
                 .unwrap();
             //let mut piece = vec![];
 
@@ -133,7 +133,7 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                 let mut message_size = [0u8; 4];
                 let package_size = s.read(&mut message_size);
                 match package_size {
-                    Ok(package_size) => (), //println!("package_size {}", package_size),
+                    Ok(package_size) => println!("package_size {}", package_size),
                     Err(e) => {
                         println!("No package for 5 secs; {}", e);
                         if peer_status.2 == true {
@@ -196,10 +196,13 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                     6 => println!("request"),
                     7 => {
                         println!(
-                            "piece {} of {}, offset {}",
+                            "piece {} of {}, offset {}/{} ({}%)",
                             big_endian_to_u32(&message_buf[1..5].try_into().unwrap()),
-                            torrent_file.info.length / torrent_file.info.piece_length,
+                            tf.info.length / tf.info.piece_length,
+                            big_endian_to_u32(&message_buf[5..9].try_into().unwrap()),
+                            tf.info.piece_length,
                             big_endian_to_u32(&message_buf[5..9].try_into().unwrap())
+                                / (tf.info.piece_length as u32 / 100)
                         );
                         file.write(&message_buf[9..=message_size as usize - 1]);
                     }
@@ -216,32 +219,26 @@ fn connect_to_peers(respone: TrackerResponse, info_hash: &InfoHash, torrent_file
                 // let pl = 255;
                 // let mut offset = 0;
                 let block_size: u32 = 16384; //16Kb more than that doesn't work somehow, BEP 52 or something,
-                if peer_status.2 == false
-                    && pn != torrent_file.info.length / torrent_file.info.piece_length
-                {
-                    println!("Requesting piece");
-
-                    println!("length {:?}", torrent_file.info.length);
-                    let be_length = (torrent_file.info.length as u32).to_be_bytes();
-                    println!("length BE {:?}", be_length);
-
-                    println!("piece_length {:?}", pl);
+                if peer_status.2 == false && pn != tf.info.length / tf.info.piece_length {
+                    let be_length = (tf.info.length as u32).to_be_bytes();
                     let be_pl = pl.to_be_bytes();
-                    println!("piece_length BE {:?}", be_pl);
-
-                    println!("piece_fraction {:?}", block_size);
                     let be_block_size = block_size.to_be_bytes();
+
+                    println!("Requesting piece");
+                    println!("length {:?}", tf.info.length);
+                    println!("length BE {:?}", be_length);
+                    println!("piece_length {:?}", pl);
+                    println!("piece_length BE {:?}", be_pl);
+                    println!("piece_fraction {:?}", block_size);
                     println!("piece_fraction BE {:?}", be_block_size);
 
                     let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
-                    request_message.append(&mut vec![0, 0, 0, pn as u8]); //piece number
-                                                                          // request_message.append(&mut vec![0,0,0,0]); //piece uhh, offset?
+                    request_message.append(&mut vec![0, 0, 0, pn as u8]); //piece number TODO
                     let be_offset = offset.to_be_bytes();
                     request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
-                                                                     // request_message.append(&mut vec![be_length[0],be_length[1],be_length[2],be_length[3]]); //piece length
 
                     request_message.append(&mut be_block_size.to_vec()); //piece length
-                    println!("\nRequesting {:?}\n", &request_message);
+                    println!("Requesting {:?}\n", &request_message);
                     s.write(&request_message);
                     offset += block_size;
                     if pl <= offset {
@@ -407,16 +404,12 @@ fn get_peers(resp: Response) -> Result<TrackerResponse, DecodeError> {
     Ok(TrackerResponse::from_bencode(&bytes)?)
 }
 
-fn connect_to_tracker(
-    announce: &str,
-    info_hash: &InfoHash,
-    length: usize,
-) -> Result<Response, ureq::Error> {
+fn connect_to_tracker(tf: &TorrentFile) -> Result<Response, ureq::Error> {
     let url = format!("{}{}info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
-            announce,
-            if announce.contains("?") {"&"} else {"?"},
-            info_hash.as_string_url_encoded(),
-            length
+            tf.announce,
+            if tf.announce.contains("?") {"&"} else {"?"},
+            tf.info_hash.as_string_url_encoded(),
+            tf.info.length
         );
     let _body = ureq::get(&url)
         .set("Content-Type", "application/octet-stream")
@@ -428,6 +421,7 @@ fn connect_to_tracker(
 struct TorrentFile {
     announce: String,
     info: Info,
+    info_hash: InfoHash,
 }
 
 impl FromBencode for TorrentFile {
@@ -436,6 +430,7 @@ impl FromBencode for TorrentFile {
     fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
         let mut announce = None;
         let mut info = None;
+        let mut info_hash = None;
 
         let mut dict = object.try_into_dictionary()?;
         while let Some(pair) = dict.next_pair()? {
@@ -446,8 +441,10 @@ impl FromBencode for TorrentFile {
                         .map(Some)?;
                 }
                 (b"info", value) => {
-                    let i = value.try_into_dictionary().unwrap().into_raw();
-                    info = Some(Info::from_bencode(i.unwrap()))
+                    let i = value.try_into_dictionary().unwrap().into_raw().unwrap();
+
+                    info_hash = Some(InfoHash::new(i));
+                    info = Some(Info::from_bencode(i))
                 }
                 (unknown_field, _) => {
                     println!(
@@ -462,12 +459,27 @@ impl FromBencode for TorrentFile {
         }
 
         let announce = announce.ok_or_else(|| DecodeError::missing_field("announce"))?;
-        let info = info
-            .ok_or_else(|| DecodeError::missing_field("info"))
-            .unwrap()
-            .unwrap();
+        let info = info.ok_or_else(|| DecodeError::missing_field("info"))??;
+        let info_hash = info_hash.ok_or_else(|| DecodeError::missing_field("info_hash"))?;
 
-        Ok(TorrentFile { announce, info })
+        Ok(TorrentFile {
+            announce,
+            info,
+            info_hash,
+        })
+    }
+}
+
+impl fmt::Display for TorrentFile {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // Customize so only `x` and `y` are denoted.
+        write!(
+            f,
+            "\x1b[1mTorrent File\x1b[0m\nannounce: {}\ninfo_hash: {}\ninfo: {}",
+            self.announce,
+            self.info_hash.as_string(),
+            self.info
+        )
     }
 }
 
@@ -582,6 +594,21 @@ impl ToBencode for Info {
     }
 }
 
+impl fmt::Display for Info {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let piece_count = self.pieces.len() / 20;
+        let mut pieces_str = String::new();
+        for i in (0..self.pieces.len()).step_by(20) {
+            pieces_str = format!("{}{:?}\n", pieces_str, &self.pieces[i..(i + 20)])
+        }
+        write!(
+            f,
+            "length: {}\nname: {}\npieces count: {}, piece length: {}",
+            self.length, self.name, piece_count, self.piece_length,
+        )
+    }
+}
+
 #[derive(Debug)]
 struct InfoHash {
     hash: [u8; 20],
@@ -589,25 +616,11 @@ struct InfoHash {
 
 impl InfoHash {
     fn new(bencode: &[u8]) -> InfoHash {
-        //THIS WORKS! Takes the whole info bencode without bullshit structs
-        let mut decoder = Decoder::new(bencode);
-        match decoder.next_object().unwrap() {
-            Some(Object::Dict(mut d)) => loop {
-                match d.next_pair().unwrap() {
-                    Some(x) => {
-                        if x.0 == b"info" {
-                            let mut hasher = Sha1::new();
-                            hasher.update(x.1.try_into_dictionary().unwrap().into_raw().unwrap());
-                            let hexes = hasher.finalize();
-                            return InfoHash {
-                                hash: hexes.try_into().expect("Wrong length"),
-                            };
-                        }
-                    }
-                    None => panic!("Wrong torrent file: no Info dictionary"),
-                }
-            },
-            _ => panic!("Wrong torrent file: not a dictionary at top level"),
+        let mut hasher = Sha1::new();
+        hasher.update(bencode);
+        let hexes = hasher.finalize();
+        return InfoHash {
+            hash: hexes.try_into().expect("Wrong length"),
         };
     }
 
