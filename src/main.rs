@@ -20,6 +20,10 @@ fn main() {
     let tf = TorrentFile::from_bencode(&x).unwrap();
     println!("\n{}\n", tf);
 
+    //preallocate file
+    let mut file = std::fs::File::create(format!("downloads/{}", &tf.info.name)).unwrap();
+    file.write_all(&vec![0; tf.info.length]).unwrap();
+
     if let Ok(r) = connect_to_tracker(&tf) {
         let respone = get_peers(r).unwrap();
         println!(
@@ -43,10 +47,6 @@ fn main() {
             }
         }*/
     }
-    // let mut file = std::fs::File::create("Ben.torrent").unwrap();
-    // file.write_all(&tf.info.to_bencode().unwrap()).unwrap();
-    // let mut file = std::fs::File::create("Profile.torrent").unwrap();
-    // file.write_all(&tf.info.profiles[0].to_bencode().unwrap());
 }
 
 fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
