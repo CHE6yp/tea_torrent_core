@@ -1,3 +1,5 @@
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::fs::OpenOptions;
 use ureq::Response;
 
@@ -119,13 +121,12 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
             // let pl: u32 = 65536;
             // let pl: u32 = 4096;
             let pl: u32 = tf.info.piece_length as u32;
+            let mut piece: Vec<u8> = vec![];
             let mut offset: u32 = 0;
             let mut file = OpenOptions::new()
-                .append(true)
-                .create(true)
+                .write(true)
                 .open(format!("downloads/{}", &tf.info.name))
                 .unwrap();
-            //let mut piece = vec![];
 
             loop {
                 let mut message_size = [0u8; 4];
@@ -202,8 +203,38 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                             big_endian_to_u32(&message_buf[5..9].try_into().unwrap())
                                 / (tf.info.piece_length as u32 / 100)
                         );
-                        file.write(&message_buf[9..=message_size as usize - 1]);
-                    }
+                        piece.append(&mut message_buf[9..].to_vec());
+
+                        println!(
+                            "piece.len() {:?} == piece_length {}",
+                            piece.len(),
+                            pl
+                        );
+
+                        //std::thread::sleep(std::time::Duration::from_secs(3));
+                        if piece.len() == pl.try_into().unwrap() {
+                            //check hash
+                            //write_piece(&mut file, &piece, pn as u64*(tf.info.piece_length as u64));
+                            println!(
+                                "SEEEEEK OFFSET {:?}",
+                                pn as u64 * (tf.info.piece_length as u64)
+                            );
+                            file.seek(SeekFrom::Start(
+                                pn as u64 * (tf.info.piece_length as u64),
+                            ))
+                            .expect("seek failed");
+                            file.write_all(&piece).expect("write failed");
+                            piece.drain(..);
+
+                            pn += 1;
+                            offset = 0;
+
+                            if pn > (tf.info.length / tf.info.piece_length).try_into().unwrap()
+                            {
+                                break;
+                            }
+                        }
+                    },
                     8 => println!("cancel"),
                     9 => println!("port"),
                     _ => println!("WHAT?!"),
@@ -239,11 +270,6 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                     println!("Requesting {:?}\n", &request_message);
                     s.write(&request_message);
                     offset += block_size;
-                    if pl <= offset {
-                        pn += 1;
-                        offset = 0;
-                        //check piece
-                    }
                 }
             }
         } else {
