@@ -195,12 +195,15 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                     6 => println!("request"),
                     7 => {
                         println!(
-                            "piece {} of {}, offset {}/{} ({}%)",
+                            "piece {} of {} ({}%), offset {}/{} ({}%)",
                             big_endian_to_u32(&message_buf[1..5].try_into().unwrap()),
                             tf.info.length / tf.info.piece_length,
+                            (big_endian_to_u32(&message_buf[1..5].try_into().unwrap()) as f64
+                                / ((tf.info.length as f64 / tf.info.piece_length as f64) / 100.0)) as u32,
+
                             big_endian_to_u32(&message_buf[5..9].try_into().unwrap()),
                             tf.info.piece_length,
-                            big_endian_to_u32(&message_buf[5..9].try_into().unwrap())
+                            big_endian_to_u32(&message_buf[5..9].try_into().unwrap()) + 16384
                                 / (tf.info.piece_length as u32 / 100)
                         );
                         piece.append(&mut message_buf[9..].to_vec());
@@ -229,7 +232,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                             pn += 1;
                             offset = 0;
 
-                            if pn > (tf.info.length / tf.info.piece_length).try_into().unwrap()
+                            if pn > tf.info.length / tf.info.piece_length
                             {
                                 break;
                             }
@@ -248,7 +251,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                 // let pl = 255;
                 // let mut offset = 0;
                 let block_size: u32 = 16384; //16Kb more than that doesn't work somehow, BEP 52 or something,
-                if peer_status.2 == false && pn != tf.info.length / tf.info.piece_length {
+                if peer_status.2 == false && offset < pl && pn <= tf.info.length / tf.info.piece_length {
                     let be_length = (tf.info.length as u32).to_be_bytes();
                     let be_pl = pl.to_be_bytes();
                     let be_block_size = block_size.to_be_bytes();
