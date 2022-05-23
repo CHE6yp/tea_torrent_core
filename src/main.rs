@@ -1,6 +1,6 @@
+use std::fs::OpenOptions;
 use std::io::Seek;
 use std::io::SeekFrom;
-use std::fs::OpenOptions;
 use ureq::Response;
 
 use std::time::Duration;
@@ -120,7 +120,9 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
             let mut pn = 0;
             // let pl: u32 = 65536;
             // let pl: u32 = 4096;
-            let pl: u32 = tf.info.piece_length as u32;
+            let mut pl: u32 = tf.info.piece_length as u32;
+            let piece_count = tf.info.length / tf.info.piece_length;
+            let mut block_size: u32 = 16384; //16Kb more than that doesn't work somehow, BEP 52 or something,
             let mut piece: Vec<u8> = vec![];
             let mut offset: u32 = 0;
             let mut file = OpenOptions::new()
@@ -132,7 +134,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                 let mut message_size = [0u8; 4];
                 let package_size = s.read(&mut message_size);
                 match package_size {
-                    Ok(package_size) => println!("package_size {}", package_size),
+                    Ok(_package_size) => {} //println!("package_size {}", package_size),
                     Err(e) => {
                         println!("No package for 5 secs; {}", e);
                         if peer_status.2 == true {
@@ -197,22 +199,19 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                         println!(
                             "piece {} of {} ({}%), offset {}/{} ({}%)",
                             big_endian_to_u32(&message_buf[1..5].try_into().unwrap()),
-                            tf.info.length / tf.info.piece_length,
-                            (big_endian_to_u32(&message_buf[1..5].try_into().unwrap()) as f64
-                                / ((tf.info.length as f64 / tf.info.piece_length as f64) / 100.0)) as u32,
-
+                            piece_count,
+                            (big_endian_to_u32(&message_buf[1..5].try_into().unwrap()) as f32
+                                / ((tf.info.length as f32 / tf.info.piece_length as f32) / 100.0))
+                                as u32,
                             big_endian_to_u32(&message_buf[5..9].try_into().unwrap()),
-                            tf.info.piece_length,
-                            big_endian_to_u32(&message_buf[5..9].try_into().unwrap()) + 16384
-                                / (tf.info.piece_length as u32 / 100)
+                            pl,
+                            ((big_endian_to_u32(&message_buf[5..9].try_into().unwrap())
+                                + block_size) as f32
+                                / (pl as f32 / 100.0)) as u32
                         );
                         piece.append(&mut message_buf[9..].to_vec());
 
-                        println!(
-                            "piece.len() {:?} == piece_length {}",
-                            piece.len(),
-                            pl
-                        );
+                        println!("piece.len() {:?} == piece_length {}", piece.len(), pl);
 
                         //std::thread::sleep(std::time::Duration::from_secs(3));
                         if piece.len() == pl.try_into().unwrap() {
@@ -222,22 +221,19 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                                 "SEEEEEK OFFSET {:?}",
                                 pn as u64 * (tf.info.piece_length as u64)
                             );
-                            file.seek(SeekFrom::Start(
-                                pn as u64 * (tf.info.piece_length as u64),
-                            ))
-                            .expect("seek failed");
+                            file.seek(SeekFrom::Start(pn as u64 * (tf.info.piece_length as u64)))
+                                .expect("seek failed");
                             file.write_all(&piece).expect("write failed");
                             piece.drain(..);
 
                             pn += 1;
                             offset = 0;
 
-                            if pn > tf.info.length / tf.info.piece_length
-                            {
+                            if pn > piece_count {
                                 break;
                             }
                         }
-                    },
+                    }
                     8 => println!("cancel"),
                     9 => println!("port"),
                     _ => println!("WHAT?!"),
@@ -250,8 +246,8 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                 // let mut pn = 0;
                 // let pl = 255;
                 // let mut offset = 0;
-                let block_size: u32 = 16384; //16Kb more than that doesn't work somehow, BEP 52 or something,
-                if peer_status.2 == false && offset < pl && pn <= tf.info.length / tf.info.piece_length {
+
+                if peer_status.2 == false && offset < pl && pn <= piece_count {
                     let be_length = (tf.info.length as u32).to_be_bytes();
                     let be_pl = pl.to_be_bytes();
                     let be_block_size = block_size.to_be_bytes();
@@ -269,7 +265,15 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                     let be_offset = offset.to_be_bytes();
                     request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
 
-                    request_message.append(&mut be_block_size.to_vec()); //piece length
+                    if pn == piece_count && offset == 0 {
+                        pl = (tf.info.length - ((piece_count) * pl as usize)) as u32;
+                        //bitwise magic! this finds the rightmost bit it last_piece_size
+                        block_size = pl & (!(pl - 1));
+
+                        //block_size = 1u32;
+                        //be_block_size = block_size.to_be_bytes();
+                    }
+                    request_message.append(&mut block_size.to_be_bytes().to_vec()); //piece length
                     println!("Requesting {:?}\n", &request_message);
                     s.write(&request_message);
                     offset += block_size;
