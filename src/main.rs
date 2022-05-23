@@ -5,6 +5,7 @@ use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::slice::Iter;
 use std::time::Duration;
 use ureq::Response;
 
@@ -25,10 +26,11 @@ fn main() {
     if path.exists() {
         let mut oo = OpenOptions::new();
         oo.read(true);
+        oo.write(true);
 
         let file_length = path.metadata().unwrap().len();
         if file_length < tf.info.length.try_into().unwrap() {
-            oo.write(true).append(true);
+            oo.append(true);
         }
         file = oo.open(file_path).unwrap();
 
@@ -56,7 +58,14 @@ fn main() {
             "Connection to {:?} complete, connecting to peers",
             &tf.announce
         );
-        connect_to_peers(respone, &tf, missing_pieces);
+
+        let streams = connect_to_peers(respone, &tf);
+        let mut streams = streams.iter();
+
+        while missing_pieces.len() > 0 {
+            let s = streams.next();
+            download_from_peer(s.unwrap(), &file, &tf, missing_pieces.iter())
+        }
     } else {
         println!("Connection to {} failed", &tf.announce);
         //TODO make backup trackers work!
@@ -64,8 +73,8 @@ fn main() {
     }
 }
 
-fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: Vec<usize>) {
-    let mut missing_pieces = missing_pieces.iter();
+fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream> {
+    let mut streams = vec![];
 
     for i in 0..respone.peers.len() {
         println!("{}", respone.peers[i]);
@@ -103,192 +112,200 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                 continue;
             }
 
-            //reading actuall data
-            s.set_read_timeout(Some(Duration::from_secs(15))).unwrap(); //safe unwrap
-            let mut file = OpenOptions::new()
-                .write(true)
-                .open(format!("downloads/{}", &tf.info.name))
-                .unwrap();
-
-            //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
-            let mut peer_status = (true, false, true, false);
-            let mut pn = missing_pieces.next().unwrap();
-            let mut pl: u32 = tf.info.piece_length as u32;
-            let piece_count = tf.info.length / tf.info.piece_length as usize;
-            //16Kb more than that doesn't work somehow, BEP 52 or something,
-            let mut block_size: u32 = 16384;
-            let mut piece: Vec<u8> = vec![];
-            let mut offset: u32 = 0;
-
-            loop {
-                let mut message_size = [0u8; 4];
-                let package_size = s.read(&mut message_size);
-                match package_size {
-                    Ok(_package_size) => {} //println!("package_size {}", package_size),
-                    Err(e) => {
-                        println!("No package for 5 secs; {}", e);
-                        if peer_status.2 == true {
-                            println!("Sending unchoke and interested");
-                            //send unchoke and interested
-                            let r = s.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
-                            match r {
-                                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                                Err(e) => println!("Error writing buffer: {:?}", e),
-                                _ => {}
-                            }
-                            peer_status.0 = false;
-                            peer_status.1 = true;
-                        } else {
-                            println!("Send keep-alive");
-                            let r = s.write(&[0, 0, 0, 0]);
-                            match r {
-                                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                                Err(e) => println!("Error writing buffer: {:?}", e),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-
-                let message_size = big_endian_to_u32(&message_size);
-                if message_size == 0 {
-                    println!("keep alive");
-                    continue;
-                }
-
-                let mut message_buf = vec![0u8; message_size as usize];
-                s.read_exact(&mut message_buf)
-                    .expect("Couldn't read buffer");
-                /*
-                    keep-alive: <len=0000>
-                    choke: <len=0001><id=0>
-                    unchoke: <len=0001><id=1>
-                    interested: <len=0001><id=2>
-                    not interested: <len=0001><id=3>
-                    have: <len=0005><id=4><piece index>
-                    bitfield: <len=0001+X><id=5><bitfield>
-                    request: <len=0013><id=6><index><begin><length>
-                    piece: <len=0009+X><id=7><index><begin><block>
-                    cancel: <len=0013><id=8><index><begin><length>
-                    port: <len=0003><id=9><listen-port>
-                */
-                match &message_buf[0] {
-                    0 => {
-                        println!("choke");
-                        peer_status.2 = true;
-                        println!("Sending unchoke and interested");
-                        //send unchoke and interested
-                        let r = s.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
-                        match r {
-                            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                            Err(e) => println!("Error writing buffer: {:?}", e),
-                            _ => {}
-                        }
-                        peer_status.0 = false;
-                        peer_status.1 = true;
-                    }
-                    1 => {
-                        println!("unchoke");
-                        peer_status.2 = false;
-                    }
-                    2 => println!("interested"),
-                    3 => println!("not interested"),
-                    4 => println!("have\n {:?}", &message_buf[1..]),
-                    5 => println!("bitfield\n {:?}", &message_buf[1..]),
-                    6 => println!("request"),
-                    7 => {
-                        println!(
-                            "piece {} of {} ({}%), offset {}/{} ({}%)",
-                            big_endian_to_u32(&message_buf[1..5].try_into().unwrap()),
-                            piece_count,
-                            (big_endian_to_u32(&message_buf[1..5].try_into().unwrap()) as f32
-                                / ((tf.info.length as f32 / tf.info.piece_length as f32) / 100.0))
-                                as u32,
-                            big_endian_to_u32(&message_buf[5..9].try_into().unwrap()),
-                            pl,
-                            ((big_endian_to_u32(&message_buf[5..9].try_into().unwrap())
-                                + block_size) as f32
-                                / (pl as f32 / 100.0)) as u32
-                        );
-                        piece.append(&mut message_buf[9..].to_vec());
-
-                        println!("piece.len() {:?} == piece_length {}", piece.len(), pl);
-
-                        //if whole piece is downloaded
-                        if piece.len() == pl.try_into().unwrap() {
-                            //check hash
-                            let mut hasher = Sha1::new();
-                            hasher.update(&piece);
-                            let hexes = hasher.finalize();
-                            let hexes: [u8; 20] =
-                                hexes.try_into().expect("Wrong length checking hash");
-                            if hexes != tf.info.get_piece_hash(*pn) {
-                                println!("Hash doesn't match!");
-                                offset = 0;
-                                continue;
-                            } else {
-                                println!("Correct hash!");
-                            }
-
-                            println!(
-                                "SEEEEEK OFFSET {:?}",
-                                *pn as u64 * (tf.info.piece_length as u64)
-                            );
-                            file.seek(SeekFrom::Start(*pn as u64 * (tf.info.piece_length as u64)))
-                                .expect("seek failed");
-                            file.write_all(&piece).expect("write failed");
-                            piece.drain(..);
-
-                            pn = missing_pieces.next().unwrap();
-                            offset = 0;
-
-                            if pn > &piece_count {
-                                break;
-                            }
-                        }
-                        println!("");
-                    }
-                    8 => println!("cancel"),
-                    9 => println!("port"),
-                    _ => println!("WHAT?!"),
-                }
-
-                //request pieces if we are unchoked
-                if peer_status.2 == false && offset < pl && pn <= &piece_count {
-                    let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
-                    request_message.append(&mut (*pn as u32).to_be_bytes().to_vec());
-                    let be_offset = offset.to_be_bytes();
-                    request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
-
-                    if *pn == piece_count {
-                        if offset == 0 {
-                            pl = (tf.info.length - ((piece_count) * pl as usize)) as u32;
-                        }
-                        let left = pl - offset;
-                        block_size = if left < 16384 {
-                            //bitwise magic! this finds the rightmost bit it last_piece_size
-                            // pl & (!(pl - 1))
-                            //and this finds the rightmost bit it last_piece_size
-                            1 << (31 - left.leading_zeros())
-                        } else {
-                            16384
-                        };
-                    }
-                    request_message.append(&mut block_size.to_be_bytes().to_vec()); //piece length
-                    println!("Requesting piece {:?}", &request_message);
-                    match s.write(&request_message) {
-                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => {
-                            println!("Error writing buffer: {:?}", e);
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    offset += block_size;
-                }
-            }
+            streams.push(s);
         } else {
             println!("Failed!");
+        }
+    }
+    streams
+}
+
+fn download_from_peer(
+    mut s: &TcpStream,
+    mut file: &File,
+    tf: &TorrentFile,
+    mut missing_pieces: Iter<usize>,
+) {
+    //reading actuall data
+    s.set_read_timeout(Some(Duration::from_secs(15))).unwrap(); //safe unwrap
+
+    //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
+    let mut peer_status = (true, false, true, false);
+    let mut pn = missing_pieces.next().unwrap();
+    let mut pl: u32 = tf.info.piece_length as u32;
+    let piece_count = tf.info.length / tf.info.piece_length as usize;
+    //16Kb more than that doesn't work somehow, BEP 52 or something,
+    let mut block_size: u32 = 16384;
+    let mut piece: Vec<u8> = vec![];
+    let mut offset: u32 = 0;
+
+    loop {
+        let mut message_size = [0u8; 4];
+        let package_size = s.read(&mut message_size);
+        match package_size {
+            Ok(_package_size) => {} //println!("package_size {}", package_size),
+            Err(e) => {
+                println!("No package for 5 secs; {}", e);
+                if peer_status.2 == true {
+                    println!("Sending unchoke and interested");
+                    //send unchoke and interested
+                    let r = s.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
+                    match r {
+                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                        Err(e) => println!("Error writing buffer: {:?}", e),
+                        _ => {}
+                    }
+                    peer_status.0 = false;
+                    peer_status.1 = true;
+                } else {
+                    println!("Send keep-alive");
+                    let r = s.write(&[0, 0, 0, 0]);
+                    match r {
+                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                        Err(e) => println!("Error writing buffer: {:?}", e),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let message_size = big_endian_to_u32(&message_size);
+        if message_size == 0 {
+            println!("keep alive");
+            continue;
+        }
+
+        let mut message_buf = vec![0u8; message_size as usize];
+        s.read_exact(&mut message_buf)
+            .expect("Couldn't read buffer");
+        /*
+            keep-alive: <len=0000>
+            choke: <len=0001><id=0>
+            unchoke: <len=0001><id=1>
+            interested: <len=0001><id=2>
+            not interested: <len=0001><id=3>
+            have: <len=0005><id=4><piece index>
+            bitfield: <len=0001+X><id=5><bitfield>
+            request: <len=0013><id=6><index><begin><length>
+            piece: <len=0009+X><id=7><index><begin><block>
+            cancel: <len=0013><id=8><index><begin><length>
+            port: <len=0003><id=9><listen-port>
+        */
+        match &message_buf[0] {
+            0 => {
+                println!("choke");
+                peer_status.2 = true;
+                println!("Sending unchoke and interested");
+                //send unchoke and interested
+                let r = s.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
+                match r {
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => println!("Error writing buffer: {:?}", e),
+                    _ => {}
+                }
+                peer_status.0 = false;
+                peer_status.1 = true;
+            }
+            1 => {
+                println!("unchoke");
+                peer_status.2 = false;
+            }
+            2 => println!("interested"),
+            3 => println!("not interested"),
+            4 => println!("have\n {:?}", &message_buf[1..]),
+            5 => println!("bitfield\n {:?}", &message_buf[1..]),
+            6 => println!("request"),
+            7 => {
+                println!(
+                    "Got piece {} of {} ({}%), offset {}/{} ({}%)",
+                    big_endian_to_u32(&message_buf[1..5].try_into().unwrap()),
+                    piece_count,
+                    (big_endian_to_u32(&message_buf[1..5].try_into().unwrap()) as f32
+                        / ((tf.info.length as f32 / tf.info.piece_length as f32) / 100.0))
+                        as u32,
+                    big_endian_to_u32(&message_buf[5..9].try_into().unwrap()),
+                    pl,
+                    ((big_endian_to_u32(&message_buf[5..9].try_into().unwrap()) + block_size)
+                        as f32
+                        / (pl as f32 / 100.0)) as u32
+                );
+                piece.append(&mut message_buf[9..].to_vec());
+
+                println!("piece.len() {:?} == piece_length {}", piece.len(), pl);
+
+                //if whole piece is downloaded
+                if piece.len() == pl.try_into().unwrap() {
+                    //check hash
+                    let mut hasher = Sha1::new();
+                    hasher.update(&piece);
+                    let hexes = hasher.finalize();
+                    let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
+                    if hexes != tf.info.get_piece_hash(*pn) {
+                        println!("Hash doesn't match!");
+                        offset = 0;
+                        continue;
+                    } else {
+                        println!("Correct hash!");
+                    }
+
+                    println!(
+                        "SEEEEEK OFFSET {:?}",
+                        *pn as u64 * (tf.info.piece_length as u64)
+                    );
+                    file.seek(SeekFrom::Start(*pn as u64 * (tf.info.piece_length as u64)))
+                        .expect("seek failed");
+                    file.write_all(&piece).expect("write failed");
+                    piece.drain(..);
+
+                    pn = missing_pieces.next().unwrap();
+                    offset = 0;
+
+                    if pn > &piece_count {
+                        break;
+                    }
+                }
+                println!("");
+            }
+            8 => println!("cancel"),
+            9 => println!("port"),
+            _ => println!("WHAT?!"),
+        }
+
+        //request pieces if we are unchoked
+        if peer_status.2 == false && offset < pl && pn <= &piece_count {
+            let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
+            request_message.append(&mut (*pn as u32).to_be_bytes().to_vec());
+            let be_offset = offset.to_be_bytes();
+            request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
+
+            if *pn == piece_count {
+                if offset == 0 {
+                    pl = (tf.info.length - ((piece_count) * pl as usize)) as u32;
+                }
+                let left = pl - offset;
+                block_size = if left < 16384 {
+                    //bitwise magic! this finds the rightmost bit it last_piece_size
+                    // pl & (!(pl - 1))
+                    //and this finds the rightmost bit it last_piece_size
+                    1 << (31 - left.leading_zeros())
+                } else {
+                    16384
+                };
+            }
+            request_message.append(&mut block_size.to_be_bytes().to_vec()); //piece length
+            println!(
+                "\x1b[1mRequesting piece {}\x1b[0m, offset {}, block size {} bytes",
+                pn, offset, block_size
+            );
+            match s.write(&request_message) {
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    println!("Error writing buffer: {:?}", e);
+                    continue;
+                }
+                _ => {}
+            }
+            offset += block_size;
         }
     }
 }
