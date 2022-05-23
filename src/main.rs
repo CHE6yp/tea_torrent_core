@@ -24,9 +24,34 @@ fn main() {
     let tf = TorrentFile::from_bencode(&x).unwrap();
     println!("\n{}\n", tf);
 
-    //preallocate file
-    let mut file = std::fs::File::create(format!("downloads/{}", &tf.info.name)).unwrap();
-    file.write_all(&vec![0; tf.info.length]).unwrap();
+    let file_path = format!("downloads/{}", &tf.info.name);
+    let path = std::path::Path::new(&file_path);
+    if path.exists() {
+        let mut file = OpenOptions::new();
+        file.read(true);
+        let file_length = path.metadata().unwrap().len();
+        if file_length < tf.info.length.try_into().unwrap() {
+            file.write(true).append(true);
+        }
+        let mut file = file.open(file_path).unwrap();
+
+        if file_length < tf.info.length.try_into().unwrap() {
+            file.write_all(&vec![0; tf.info.length - file_length as usize])
+                .unwrap();
+        }
+    } else {
+        //preallocate file
+        let mut file = std::fs::File::create(file_path).unwrap();
+        file.write_all(&vec![0; tf.info.length]).unwrap();
+    }
+
+    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    check_file_hash();//TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     if let Ok(r) = connect_to_tracker(&tf) {
         let respone = get_peers(r).unwrap();
@@ -156,7 +181,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                 let message_size = big_endian_to_u32(&message_size);
                 //println!("message size {:?}", message_size);
                 if message_size == 0 {
-                    //println!("keep alive");
+                    println!("keep alive");
                     continue;
                 }
 
@@ -276,7 +301,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                     println!("piece_fraction BE {:?}", be_block_size);
 
                     let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
-                    request_message.append(&mut vec![0, 0, 0, pn as u8]); //piece number TODO
+                    request_message.append(&mut (pn as u32).to_be_bytes().to_vec()); //piece number TODO
                     let be_offset = offset.to_be_bytes();
                     request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
 
@@ -299,6 +324,8 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
         }
     }
 }
+
+fn check_file_hash() {}
 
 fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
     ((value[0] as u32) << 24)
