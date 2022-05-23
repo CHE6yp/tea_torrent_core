@@ -58,7 +58,6 @@ impl FromBencode for TorrentFile {
 
 impl fmt::Display for TorrentFile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Customize so only `x` and `y` are denoted.
         write!(
             f,
             "\x1b[1mTorrent File\x1b[0m\nannounce: {}\ninfo_hash: {}\ninfo: {}",
@@ -75,7 +74,7 @@ pub struct Info {
     //file_media: Vec<usize>,    //?
     pub length: usize,
     pub name: String,
-    pub piece_length: usize,
+    pub piece_length: u32,
     pieces: Vec<u8>,
     //profiles: Vec<Profile>, //?
 }
@@ -127,7 +126,7 @@ impl FromBencode for Info {
                         .map(Some)?;
                 }
                 (b"piece length", value) => {
-                    piece_length = usize::decode_bencode_object(value)
+                    piece_length = u32::decode_bencode_object(value)
                         .context("piece length")
                         .map(Some)?;
                 }

@@ -1,19 +1,12 @@
-use sha1::Digest;
-use sha1::Sha1;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::Seek;
-use std::io::SeekFrom;
-use ureq::Response;
-
-use std::time::Duration;
-
+use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
+use sha1::{Digest, Sha1};
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpStream;
-
-use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
+use ureq::Response;
 
 mod tf;
 use crate::tf::*;
@@ -49,7 +42,8 @@ fn main() {
             .read(true)
             .write(true)
             .create(true)
-            .open(file_path).unwrap();
+            .open(file_path)
+            .unwrap();
         file.write_all(&vec![0; tf.info.length]).unwrap();
     }
 
@@ -66,56 +60,21 @@ fn main() {
     } else {
         println!("Connection to {} failed", &tf.announce);
         //TODO make backup trackers work!
-        /*println!();
-        println!("Trying backup trackers");
-        for tracker in trackers() {
-            println!("Trying {}", tracker);
-            // if let Ok(r) = connect_to_tracker(&tf) {
-            if let Ok(r) = connect_to_tracker(&TorrentFile{announce: tracker, info: tf.info, info_hash: tf.info_hash}) {
-                let respone = get_peers(r).unwrap();
-                println!("Connection to {:?} complete, connecting to peers", &tracker);
-
-                connect_to_peers(respone, &tf);
-            }
-        }*/
+        //TODO instead, make DHT work!
     }
 }
 
 fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: Vec<usize>) {
     let mut missing_pieces = missing_pieces.iter();
 
-    for i in (0..respone.peers.len()).step_by(6) {
-        println!(
-            "{}.{}.{}.{}:{}",
-            respone.peers[i],
-            respone.peers[i + 1],
-            respone.peers[i + 2],
-            respone.peers[i + 3],
-            ((respone.peers[i + 4] as u16) << 8) + respone.peers[i + 5] as u16
-        );
+    for i in 0..respone.peers.len() {
+        println!("{}", respone.peers[i]);
     }
     println!("=================");
-    for i in (0..respone.peers.len()).step_by(6) {
-        println!(
-            "Trying {}.{}.{}.{}:{}",
-            respone.peers[i],
-            respone.peers[i + 1],
-            respone.peers[i + 2],
-            respone.peers[i + 3],
-            ((respone.peers[i + 4] as u16) << 8) + respone.peers[i + 5] as u16
-        );
-        let stream = TcpStream::connect_timeout(
-            &std::net::SocketAddr::from((
-                [
-                    respone.peers[i],
-                    respone.peers[i + 1],
-                    respone.peers[i + 2],
-                    respone.peers[i + 3],
-                ],
-                ((respone.peers[i + 4] as u16) << 8) + respone.peers[i + 5] as u16,
-            )),
-            Duration::from_secs(2),
-        );
+    for i in 0..respone.peers.len() {
+        println!("Trying {}", respone.peers[i]);
+        let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(2));
+
         if let Ok(mut s) = stream {
             //writing handhsake
             let mut arr = vec![19];
@@ -129,7 +88,6 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
             let mut handshake_buff = [0u8; 68];
             s.read(&mut handshake_buff)
                 .expect("Couldn't read buffer; Handshake");
-            //println!("{:?}", handshake_buff);
             println!(
                 "{};\n extentions {:?}\n info_hash {}\n vs our    {}\n peer id {} ({})",
                 String::from_utf8_lossy(&handshake_buff[1..20]),
@@ -146,21 +104,21 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
             }
 
             //reading actuall data
-            s.set_read_timeout(Some(Duration::from_secs(15)));
-            let mut peer_status = (true, false, true, false); //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
-
-            let mut pn = missing_pieces.next().unwrap();
-            // let pl: u32 = 65536;
-            // let pl: u32 = 4096;
-            let mut pl: u32 = tf.info.piece_length as u32;
-            let piece_count = tf.info.length / tf.info.piece_length;
-            let mut block_size: u32 = 16384; //16Kb more than that doesn't work somehow, BEP 52 or something,
-            let mut piece: Vec<u8> = vec![];
-            let mut offset: u32 = 0;
+            s.set_read_timeout(Some(Duration::from_secs(15))).unwrap(); //safe unwrap
             let mut file = OpenOptions::new()
                 .write(true)
                 .open(format!("downloads/{}", &tf.info.name))
                 .unwrap();
+
+            //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
+            let mut peer_status = (true, false, true, false);
+            let mut pn = missing_pieces.next().unwrap();
+            let mut pl: u32 = tf.info.piece_length as u32;
+            let piece_count = tf.info.length / tf.info.piece_length as usize;
+            //16Kb more than that doesn't work somehow, BEP 52 or something,
+            let mut block_size: u32 = 16384;
+            let mut piece: Vec<u8> = vec![];
+            let mut offset: u32 = 0;
 
             loop {
                 let mut message_size = [0u8; 4];
@@ -171,20 +129,28 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                         println!("No package for 5 secs; {}", e);
                         if peer_status.2 == true {
                             println!("Sending unchoke and interested");
-                            s.write(&[0, 0, 0, 1, 1]); //send unchoke
+                            //send unchoke and interested
+                            let r = s.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
+                            match r {
+                                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                                Err(e) => println!("Error writing buffer: {:?}", e),
+                                _ => {}
+                            }
                             peer_status.0 = false;
-                            s.write(&[0, 0, 0, 1, 2]); //send interested
                             peer_status.1 = true;
                         } else {
                             println!("Send keep-alive");
-                            s.write(&[0, 0, 0, 0]);
-                            //s.write(&[0, 0, 0, 13, 6, 0,0,0,1, 0,0,0,0, 0,0,0,255 ]);
+                            let r = s.write(&[0, 0, 0, 0]);
+                            match r {
+                                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                                Err(e) => println!("Error writing buffer: {:?}", e),
+                                _ => {}
+                            }
                         }
                     }
                 }
 
                 let message_size = big_endian_to_u32(&message_size);
-                //println!("message size {:?}", message_size);
                 if message_size == 0 {
                     println!("keep alive");
                     continue;
@@ -210,8 +176,14 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                     0 => {
                         println!("choke");
                         peer_status.2 = true;
-                        s.write(&[0, 0, 0, 1, 1]); //send unchoke
-                        s.write(&[0, 0, 0, 1, 2]); //send interested
+                        println!("Sending unchoke and interested");
+                        //send unchoke and interested
+                        let r = s.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
+                        match r {
+                            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                            Err(e) => println!("Error writing buffer: {:?}", e),
+                            _ => {}
+                        }
                         peer_status.0 = false;
                         peer_status.1 = true;
                     }
@@ -222,10 +194,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                     2 => println!("interested"),
                     3 => println!("not interested"),
                     4 => println!("have\n {:?}", &message_buf[1..]),
-                    5 => println!(
-                        "bitfield\n {:?}",
-                        &message_buf[1..]
-                    ),
+                    5 => println!("bitfield\n {:?}", &message_buf[1..]),
                     6 => println!("request"),
                     7 => {
                         println!(
@@ -245,7 +214,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
 
                         println!("piece.len() {:?} == piece_length {}", piece.len(), pl);
 
-                        //std::thread::sleep(std::time::Duration::from_secs(3));
+                        //if whole piece is downloaded
                         if piece.len() == pl.try_into().unwrap() {
                             //check hash
                             let mut hasher = Sha1::new();
@@ -261,7 +230,6 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                                 println!("Correct hash!");
                             }
 
-                            //write_piece(&mut file, &piece, pn as u64*(tf.info.piece_length as u64));
                             println!(
                                 "SEEEEEK OFFSET {:?}",
                                 *pn as u64 * (tf.info.piece_length as u64)
@@ -278,35 +246,17 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                                 break;
                             }
                         }
+                        println!("");
                     }
                     8 => println!("cancel"),
                     9 => println!("port"),
                     _ => println!("WHAT?!"),
                 }
 
-                //continue;
                 //request pieces if we are unchoked
-
-                //request 256 pieces
-                // let mut pn = 0;
-                // let pl = 255;
-                // let mut offset = 0;
-
                 if peer_status.2 == false && offset < pl && pn <= &piece_count {
-                    let be_length = (tf.info.length as u32).to_be_bytes();
-                    let be_pl = pl.to_be_bytes();
-                    let be_block_size = block_size.to_be_bytes();
-
-                    println!("Requesting piece");
-                    println!("length {:?}", tf.info.length);
-                    println!("length BE {:?}", be_length);
-                    println!("piece_length {:?}", pl);
-                    println!("piece_length BE {:?}", be_pl);
-                    println!("piece_fraction {:?}", block_size);
-                    println!("piece_fraction BE {:?}", be_block_size);
-
                     let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
-                    request_message.append(&mut (*pn as u32).to_be_bytes().to_vec()); //piece number TODO
+                    request_message.append(&mut (*pn as u32).to_be_bytes().to_vec());
                     let be_offset = offset.to_be_bytes();
                     request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
 
@@ -318,25 +268,22 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                         block_size = if left < 16384 {
                             //bitwise magic! this finds the rightmost bit it last_piece_size
                             // pl & (!(pl - 1))
-
-                            // println!("pl >> 31 {:?}", (left as u32 >> 31));
-                            // println!("pl >> 31 & 1 {:?}", (left as u32 >> 31) & 1);
-                            // println!("left leading 0 = {:?}", left.leading_zeros());
-                            // println!("31-left.leading_zeros() = {:?}", 31-left.leading_zeros());
-                            // println!("1 << 31-left.leading_zeros(); = {:?}", 1 << (31-left.leading_zeros()));
-
                             //and this finds the rightmost bit it last_piece_size
                             1 << (31 - left.leading_zeros())
                         } else {
                             16384
                         };
-
-                        //block_size = 1u32;
-                        //be_block_size = block_size.to_be_bytes();
                     }
                     request_message.append(&mut block_size.to_be_bytes().to_vec()); //piece length
-                    println!("Requesting {:?}\n", &request_message);
-                    s.write(&request_message);
+                    println!("Requesting piece {:?}", &request_message);
+                    match s.write(&request_message) {
+                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            println!("Error writing buffer: {:?}", e);
+                            continue;
+                        }
+                        _ => {}
+                    }
                     offset += block_size;
                 }
             }
@@ -348,34 +295,28 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
 
 //todo check this fn it can be better
 fn check_file_hash(file: &File, tf: &TorrentFile) -> Vec<usize> {
-    let piece_count = tf.info.length / tf.info.piece_length;
-    let mut read_buf = Vec::with_capacity(tf.info.piece_length);
+    let piece_count = tf.info.length / tf.info.piece_length as usize;
+    let mut read_buf = Vec::with_capacity(tf.info.piece_length as usize);
     let mut missing_pieces = vec![];
+    let mut hasher = Sha1::new();
 
-    println!("piece_count {:?}", piece_count);
     for p in 0..piece_count + 1 {
-        let f = file
-            .take(tf.info.piece_length as u64)
+        file.take(tf.info.piece_length as u64)
             .read_to_end(&mut read_buf)
             .unwrap();
-        //println!("file readbuff {:?}, bytes {}", read_buf, f);
-        let mut hasher = Sha1::new(); //todo
         hasher.update(&read_buf);
-        let hexes = hasher.finalize();
-        println!("bytes {}", f);
-        println!("hexes {:?}", hexes);
-        println!("phash {:?}", tf.info.get_piece_hash(p));
+        let hexes = hasher.finalize_reset();
+
         read_buf.drain(..);
         let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
 
         if hexes != tf.info.get_piece_hash(p) {
-            println!("Hash doesn't match!");
+            println!("piece {}; Hash doesn't match!", p);
             missing_pieces.push(p);
         } else {
-            println!("Correct hash!");
+            println!("piece {}; Correct hash!", p);
         }
     }
-
     missing_pieces
 }
 
@@ -387,6 +328,7 @@ fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
 }
 
 //BACKUP TRACKERS!!!
+#[allow(dead_code)]
 fn trackers() -> [String; 25] {
     [
         "https://tr.abiir.top:443/announce".to_string(), //best amount of peers!!!
@@ -544,9 +486,11 @@ fn connect_to_tracker(tf: &TorrentFile) -> Result<Response, ureq::Error> {
 
 #[derive(Debug)]
 struct TrackerResponse {
+    #[allow(dead_code)]
     interval: usize,
+    #[allow(dead_code)]
     min_interval: usize,
-    peers: Vec<u8>,
+    peers: Vec<SocketAddr>,
 }
 
 impl FromBencode for TrackerResponse {
@@ -569,8 +513,15 @@ impl FromBencode for TrackerResponse {
                         .map(Some)?;
                 }
                 (b"peers", value) => {
-                    //peers is not human readable, so we can't put it to String
-                    peers = Some(value.try_into_bytes().unwrap().to_vec());
+                    let p = value.try_into_bytes().unwrap().to_vec();
+                    let mut v = vec![];
+                    for i in (0..p.len()).step_by(6) {
+                        v.push(SocketAddr::from((
+                            [p[i], p[i + 1], p[i + 2], p[i + 3]],
+                            ((p[i + 4] as u16) << 8) + p[i + 5] as u16,
+                        )));
+                    }
+                    peers = Some(v);
                 }
                 (unknown_field, _) => {
                     println!(
