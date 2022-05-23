@@ -1,3 +1,5 @@
+use sha1::Digest;
+use sha1::Sha1;
 use std::fs::OpenOptions;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -216,6 +218,19 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                         //std::thread::sleep(std::time::Duration::from_secs(3));
                         if piece.len() == pl.try_into().unwrap() {
                             //check hash
+                            let mut hasher = Sha1::new();
+                            hasher.update(&piece);
+                            let hexes = hasher.finalize();
+                            let hexes: [u8; 20] =
+                                hexes.try_into().expect("Wrong length checking hash");
+                            if hexes != tf.info.get_piece_hash(pn) {
+                                println!("Hash doesn't match!");
+                                offset = 0;
+                                continue;
+                            } else {
+                                println!("Correct hash!");
+                            }
+
                             //write_piece(&mut file, &piece, pn as u64*(tf.info.piece_length as u64));
                             println!(
                                 "SEEEEEK OFFSET {:?}",

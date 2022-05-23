@@ -80,6 +80,16 @@ pub struct Info {
     //profiles: Vec<Profile>, //?
 }
 
+impl Info {
+    pub fn get_piece_hash(&self, piece: usize) -> &[u8] {
+        if piece > self.pieces.len() / 20 {
+            panic!("PIECES ARRAY OVERFLOW!");
+        }
+
+        &self.pieces[piece * 20..(piece + 1) * 20]
+    }
+}
+
 impl FromBencode for Info {
     //const EXPECTED_RECURSION_DEPTH: usize = 1;
 
