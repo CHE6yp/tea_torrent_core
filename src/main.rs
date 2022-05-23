@@ -1,6 +1,6 @@
-use std::fs::File;
 use sha1::Digest;
 use sha1::Sha1;
+use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -28,7 +28,7 @@ fn main() {
     let mut file;
     let file_path = format!("downloads/{}", &tf.info.name);
     let path = std::path::Path::new(&file_path);
-    
+
     if path.exists() {
         let mut oo = OpenOptions::new();
         oo.read(true);
@@ -43,7 +43,6 @@ fn main() {
             file.write_all(&vec![0; tf.info.length - file_length as usize])
                 .unwrap();
         }
-
     } else {
         //preallocate file
         file = std::fs::File::create(file_path).unwrap();
@@ -52,7 +51,6 @@ fn main() {
 
     let missing_pieces = check_file_hash(&file, &tf);
     println!("missing_pieces {:?}", missing_pieces);
-
 
     if let Ok(r) = connect_to_tracker(&tf) {
         let respone = get_peers(r).unwrap();
@@ -308,10 +306,26 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                     let be_offset = offset.to_be_bytes();
                     request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
 
-                    if *pn == piece_count && offset == 0 {
-                        pl = (tf.info.length - ((piece_count) * pl as usize)) as u32;
-                        //bitwise magic! this finds the rightmost bit it last_piece_size
-                        block_size = pl & (!(pl - 1));
+                    if *pn == piece_count {
+                        if offset == 0 {
+                            pl = (tf.info.length - ((piece_count) * pl as usize)) as u32;
+                        }
+                        let left = pl - offset;
+                        block_size = if left < 16384 {
+                            //bitwise magic! this finds the rightmost bit it last_piece_size
+                            // pl & (!(pl - 1))
+
+                            // println!("pl >> 31 {:?}", (left as u32 >> 31));
+                            // println!("pl >> 31 & 1 {:?}", (left as u32 >> 31) & 1);
+                            // println!("left leading 0 = {:?}", left.leading_zeros());
+                            // println!("31-left.leading_zeros() = {:?}", 31-left.leading_zeros());
+                            // println!("1 << 31-left.leading_zeros(); = {:?}", 1 << (31-left.leading_zeros()));
+
+                            //and this finds the rightmost bit it last_piece_size
+                            1 << (31 - left.leading_zeros())
+                        } else {
+                            16384
+                        };
 
                         //block_size = 1u32;
                         //be_block_size = block_size.to_be_bytes();
@@ -328,16 +342,18 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
     }
 }
 
-
 //todo check this fn it can be better
-fn check_file_hash(mut file: &File, tf: &TorrentFile) -> Vec<usize> {
+fn check_file_hash(file: &File, tf: &TorrentFile) -> Vec<usize> {
     let piece_count = tf.info.length / tf.info.piece_length;
     let mut read_buf = Vec::with_capacity(tf.info.piece_length);
     let mut missing_pieces = vec![];
 
     println!("piece_count {:?}", piece_count);
-    for p in 0..piece_count+1 {
-        let f = std::io::Read::by_ref(&mut file).take(tf.info.piece_length as u64).read_to_end(&mut read_buf).unwrap();
+    for p in 0..piece_count + 1 {
+        let f = file
+            .take(tf.info.piece_length as u64)
+            .read_to_end(&mut read_buf)
+            .unwrap();
         //println!("file readbuff {:?}, bytes {}", read_buf, f);
         let mut hasher = Sha1::new(); //todo
         hasher.update(&read_buf);
@@ -346,8 +362,7 @@ fn check_file_hash(mut file: &File, tf: &TorrentFile) -> Vec<usize> {
         println!("hexes {:?}", hexes);
         println!("phash {:?}", tf.info.get_piece_hash(p));
         read_buf.drain(..);
-        let hexes: [u8; 20] =
-            hexes.try_into().expect("Wrong length checking hash");
+        let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
 
         if hexes != tf.info.get_piece_hash(p) {
             println!("Hash doesn't match!");
