@@ -45,7 +45,11 @@ fn main() {
         }
     } else {
         //preallocate file
-        file = std::fs::File::create(file_path).unwrap();
+        file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(file_path).unwrap();
         file.write_all(&vec![0; tf.info.length]).unwrap();
     }
 
@@ -217,10 +221,10 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: 
                     }
                     2 => println!("interested"),
                     3 => println!("not interested"),
-                    4 => println!("have\n {:?}", &message_buf[1..=message_size as usize - 1]),
+                    4 => println!("have\n {:?}", &message_buf[1..]),
                     5 => println!(
                         "bitfield\n {:?}",
-                        &message_buf[1..=message_size as usize - 1]
+                        &message_buf[1..]
                     ),
                     6 => println!("request"),
                     7 => {
