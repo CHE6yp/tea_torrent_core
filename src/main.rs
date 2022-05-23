@@ -1,3 +1,4 @@
+use std::fs::File;
 use sha1::Digest;
 use sha1::Sha1;
 use std::fs::OpenOptions;
@@ -24,34 +25,34 @@ fn main() {
     let tf = TorrentFile::from_bencode(&x).unwrap();
     println!("\n{}\n", tf);
 
+    let mut file;
     let file_path = format!("downloads/{}", &tf.info.name);
     let path = std::path::Path::new(&file_path);
+    
     if path.exists() {
-        let mut file = OpenOptions::new();
-        file.read(true);
+        let mut oo = OpenOptions::new();
+        oo.read(true);
+
         let file_length = path.metadata().unwrap().len();
         if file_length < tf.info.length.try_into().unwrap() {
-            file.write(true).append(true);
+            oo.write(true).append(true);
         }
-        let mut file = file.open(file_path).unwrap();
+        file = oo.open(file_path).unwrap();
 
         if file_length < tf.info.length.try_into().unwrap() {
             file.write_all(&vec![0; tf.info.length - file_length as usize])
                 .unwrap();
         }
+
     } else {
         //preallocate file
-        let mut file = std::fs::File::create(file_path).unwrap();
+        file = std::fs::File::create(file_path).unwrap();
         file.write_all(&vec![0; tf.info.length]).unwrap();
     }
 
-    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    check_file_hash();//TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    //TODOOOOOOOOOOOOOOOOOOO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    let missing_pieces = check_file_hash(&file, &tf);
+    println!("missing_pieces {:?}", missing_pieces);
+
 
     if let Ok(r) = connect_to_tracker(&tf) {
         let respone = get_peers(r).unwrap();
@@ -59,7 +60,7 @@ fn main() {
             "Connection to {:?} complete, connecting to peers",
             &tf.announce
         );
-        connect_to_peers(respone, &tf);
+        connect_to_peers(respone, &tf, missing_pieces);
     } else {
         println!("Connection to {} failed", &tf.announce);
         //TODO make backup trackers work!
@@ -78,7 +79,9 @@ fn main() {
     }
 }
 
-fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
+fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile, missing_pieces: Vec<usize>) {
+    let mut missing_pieces = missing_pieces.iter();
+
     for i in (0..respone.peers.len()).step_by(6) {
         println!(
             "{}.{}.{}.{}:{}",
@@ -144,7 +147,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
             s.set_read_timeout(Some(Duration::from_secs(15)));
             let mut peer_status = (true, false, true, false); //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
 
-            let mut pn = 0;
+            let mut pn = missing_pieces.next().unwrap();
             // let pl: u32 = 65536;
             // let pl: u32 = 4096;
             let mut pl: u32 = tf.info.piece_length as u32;
@@ -248,7 +251,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                             let hexes = hasher.finalize();
                             let hexes: [u8; 20] =
                                 hexes.try_into().expect("Wrong length checking hash");
-                            if hexes != tf.info.get_piece_hash(pn) {
+                            if hexes != tf.info.get_piece_hash(*pn) {
                                 println!("Hash doesn't match!");
                                 offset = 0;
                                 continue;
@@ -259,17 +262,17 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                             //write_piece(&mut file, &piece, pn as u64*(tf.info.piece_length as u64));
                             println!(
                                 "SEEEEEK OFFSET {:?}",
-                                pn as u64 * (tf.info.piece_length as u64)
+                                *pn as u64 * (tf.info.piece_length as u64)
                             );
-                            file.seek(SeekFrom::Start(pn as u64 * (tf.info.piece_length as u64)))
+                            file.seek(SeekFrom::Start(*pn as u64 * (tf.info.piece_length as u64)))
                                 .expect("seek failed");
                             file.write_all(&piece).expect("write failed");
                             piece.drain(..);
 
-                            pn += 1;
+                            pn = missing_pieces.next().unwrap();
                             offset = 0;
 
-                            if pn > piece_count {
+                            if pn > &piece_count {
                                 break;
                             }
                         }
@@ -287,7 +290,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                 // let pl = 255;
                 // let mut offset = 0;
 
-                if peer_status.2 == false && offset < pl && pn <= piece_count {
+                if peer_status.2 == false && offset < pl && pn <= &piece_count {
                     let be_length = (tf.info.length as u32).to_be_bytes();
                     let be_pl = pl.to_be_bytes();
                     let be_block_size = block_size.to_be_bytes();
@@ -301,11 +304,11 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
                     println!("piece_fraction BE {:?}", be_block_size);
 
                     let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
-                    request_message.append(&mut (pn as u32).to_be_bytes().to_vec()); //piece number TODO
+                    request_message.append(&mut (*pn as u32).to_be_bytes().to_vec()); //piece number TODO
                     let be_offset = offset.to_be_bytes();
                     request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
 
-                    if pn == piece_count && offset == 0 {
+                    if *pn == piece_count && offset == 0 {
                         pl = (tf.info.length - ((piece_count) * pl as usize)) as u32;
                         //bitwise magic! this finds the rightmost bit it last_piece_size
                         block_size = pl & (!(pl - 1));
@@ -325,7 +328,37 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) {
     }
 }
 
-fn check_file_hash() {}
+
+//todo check this fn it can be better
+fn check_file_hash(mut file: &File, tf: &TorrentFile) -> Vec<usize> {
+    let piece_count = tf.info.length / tf.info.piece_length;
+    let mut read_buf = Vec::with_capacity(tf.info.piece_length);
+    let mut missing_pieces = vec![];
+
+    println!("piece_count {:?}", piece_count);
+    for p in 0..piece_count+1 {
+        let f = std::io::Read::by_ref(&mut file).take(tf.info.piece_length as u64).read_to_end(&mut read_buf).unwrap();
+        //println!("file readbuff {:?}, bytes {}", read_buf, f);
+        let mut hasher = Sha1::new(); //todo
+        hasher.update(&read_buf);
+        let hexes = hasher.finalize();
+        println!("bytes {}", f);
+        println!("hexes {:?}", hexes);
+        println!("phash {:?}", tf.info.get_piece_hash(p));
+        read_buf.drain(..);
+        let hexes: [u8; 20] =
+            hexes.try_into().expect("Wrong length checking hash");
+
+        if hexes != tf.info.get_piece_hash(p) {
+            println!("Hash doesn't match!");
+            missing_pieces.push(p);
+        } else {
+            println!("Correct hash!");
+        }
+    }
+
+    missing_pieces
+}
 
 fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
     ((value[0] as u32) << 24)
