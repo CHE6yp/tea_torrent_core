@@ -6,6 +6,7 @@ use std::fmt;
 #[derive(Debug)]
 pub struct TorrentFile {
     pub announce: String,
+    pub announce_list: Option<Vec<Vec<String>>>,
     pub info: Info,
     pub info_hash: InfoHash,
 }
@@ -15,6 +16,7 @@ impl FromBencode for TorrentFile {
 
     fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
         let mut announce = None;
+        let mut announce_list = None;
         let mut info = None;
         let mut info_hash = None;
 
@@ -24,6 +26,11 @@ impl FromBencode for TorrentFile {
                 (b"announce", value) => {
                     announce = String::decode_bencode_object(value)
                         .context("announce")
+                        .map(Some)?;
+                }
+                (b"announce-list", value) => {
+                    announce_list = Vec::<Vec<String>>::decode_bencode_object(value)
+                        .context("announce-list")
                         .map(Some)?;
                 }
                 (b"info", value) => {
@@ -50,6 +57,7 @@ impl FromBencode for TorrentFile {
 
         Ok(TorrentFile {
             announce,
+            announce_list,
             info,
             info_hash,
         })
@@ -60,10 +68,11 @@ impl fmt::Display for TorrentFile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "\x1b[1mTorrent File\x1b[0m\nannounce: {}\ninfo_hash: {}\ninfo: {}",
+            "\x1b[1mTorrent File\x1b[0m\nannounce: {}\ninfo_hash: {}\ninfo: {}\nannounce_list {:?}",
             self.announce,
             self.info_hash.as_string(),
-            self.info
+            self.info,
+            self.announce_list,
         )
     }
 }
