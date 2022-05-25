@@ -2,6 +2,7 @@ use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
 use bendy::encoding::{AsString, Error as EncodeError, SingleItemEncoder, ToBencode};
 use sha1::{Digest, Sha1};
 use std::fmt;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct TorrentFile {
@@ -221,7 +222,7 @@ impl FromBencode for Info {
         if files.len() == 0 {
             files.push(File {
                 length: length,
-                path: name.clone(),
+                path: PathBuf::from(name.clone()),
             });
         }
         //let profiles = profiles.ok_or_else(|| DecodeError::missing_field("profiles"))?;
@@ -266,7 +267,7 @@ impl fmt::Display for Info {
         }
         let mut files = String::new();
         for f in &self.files {
-            files += &format!("{} \x1b[1m{}\x1b[0m\n", f.path, f.length)
+            files += &format!("{} \x1b[1m{}\x1b[0m\n", f.path.display(), f.length)
         }
         write!(
             f,
@@ -315,7 +316,7 @@ impl InfoHash {
 #[derive(Debug, Clone)]
 pub struct File {
     length: usize,
-    path: String,
+    path: PathBuf,
 }
 
 impl FromBencode for File {
@@ -335,12 +336,8 @@ impl FromBencode for File {
                 }
                 (b"path", value) => {
                     let p = Vec::<String>::decode_bencode_object(value).context("path")?;
-                    let mut ps = String::new();
-                    for s in p {
-                        ps.push_str("/");
-                        ps.push_str(&s);
-                    }
-                    path = Some(ps);
+                    let pb: PathBuf = p.iter().collect();
+                    path = Some(pb);
                 }
                 (unknown_field, _) => {
                     println!(
