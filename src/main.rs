@@ -21,10 +21,10 @@ fn main() {
     println!("\n{}\n", tf);
 
     preallocate(&tf);
+    let missing_pieces = check_file_hash(&tf);
     return;
     /*
 
-    let missing_pieces = check_file_hash(&file, &tf);
     println!("missing_pieces {:?}", missing_pieces);
 
     let r = connect_to_tracker(&tf, false);
@@ -334,16 +334,39 @@ fn download_from_peer(
 }
 
 //todo check this fn it can be better
-fn check_file_hash(file: &File, tf: &TorrentFile) -> Vec<usize> {
+fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
     let piece_count = tf.info.length / tf.info.piece_length as usize;
     let mut read_buf = Vec::with_capacity(tf.info.piece_length as usize);
     let mut missing_pieces = vec![];
     let mut hasher = Sha1::new();
 
     for p in 0..piece_count + 1 {
-        file.take(tf.info.piece_length as u64)
-            .read_to_end(&mut read_buf)
-            .unwrap();
+        let (offset, files) = tf.info.get_piece_files(p);
+
+        println!("{:?}", files);
+        let mut first = true;
+        for file in files {
+            let file_path = format!("downloads/{}", &tf.info.name);
+            let path = std::path::Path::new(&file_path);
+            let mut fc = file.clone();
+            fc.path = path.join(file.path.clone());
+
+            let mut f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(fc.path)
+                .unwrap();
+
+            if first {
+                f.seek(SeekFrom::Start(offset as u64)).expect("seek failed");
+                first = false;
+            }
+
+            f.take(tf.info.piece_length as u64)
+                .read_to_end(&mut read_buf)
+                .unwrap();
+        }
+
         hasher.update(&read_buf);
         let hexes = hasher.finalize_reset();
 
