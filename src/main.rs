@@ -20,36 +20,9 @@ fn main() {
     let tf = TorrentFile::from_bencode(&x).unwrap();
     println!("\n{}\n", tf);
 
-    let mut file;
-    let file_path = format!("downloads/{}", &tf.info.name);
-    let path = std::path::Path::new(&file_path);
+    preallocate(&tf);
     return;
-
-    if path.exists() {
-        let mut oo = OpenOptions::new();
-        oo.read(true);
-        oo.write(true);
-
-        let file_length = path.metadata().unwrap().len();
-        if file_length < tf.info.length.try_into().unwrap() {
-            oo.append(true);
-        }
-        file = oo.open(file_path).unwrap();
-
-        if file_length < tf.info.length.try_into().unwrap() {
-            file.write_all(&vec![0; tf.info.length - file_length as usize])
-                .unwrap();
-        }
-    } else {
-        //preallocate file
-        file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(file_path)
-            .unwrap();
-        file.write_all(&vec![0; tf.info.length]).unwrap();
-    }
+    /*
 
     let missing_pieces = check_file_hash(&file, &tf);
     println!("missing_pieces {:?}", missing_pieces);
@@ -70,6 +43,57 @@ fn main() {
         let s = streams.next();
         download_from_peer(s.unwrap(), &file, &tf, missing_pieces.iter())
     }
+    */
+}
+
+fn preallocate(tf: &TorrentFile) {
+    println!("Preallocating files");
+    let file_path = format!("downloads/{}", &tf.info.name);
+    let path = std::path::Path::new(&file_path);
+    fs::create_dir(path);
+    //TODO ok wtf did i do here?
+    let files: Vec<tf::File> = tf
+        .info
+        .files
+        .iter()
+        .map(|f| -> tf::File {
+            let mut fc = f.clone();
+            fc.path = path.join(f.path.clone());
+            fc
+        })
+        .collect();
+
+    for file in files {
+        if let Some(dir_path) = file.path.as_path().parent() {
+            fs::create_dir_all(dir_path);
+        }
+        if file.path.exists() {
+            let mut oo = OpenOptions::new();
+            oo.read(true);
+            oo.write(true);
+
+            let file_length = file.path.metadata().unwrap().len();
+            if file_length < file.length.try_into().unwrap() {
+                oo.append(true);
+            }
+            let mut f = oo.open(file.path).unwrap();
+
+            if file_length < file.length.try_into().unwrap() {
+                f.write_all(&vec![0; file.length - file_length as usize])
+                    .unwrap();
+            }
+        } else {
+            //preallocate file
+            let mut f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(file.path)
+                .unwrap();
+            f.write_all(&vec![0; file.length]).unwrap();
+        }
+    }
+    println!("Preallocation complete");
 }
 
 fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream> {

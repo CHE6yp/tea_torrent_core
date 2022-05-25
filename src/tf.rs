@@ -315,8 +315,8 @@ impl InfoHash {
 
 #[derive(Debug, Clone)]
 pub struct File {
-    length: usize,
-    path: PathBuf,
+    pub length: usize,
+    pub path: PathBuf,
 }
 
 impl FromBencode for File {
