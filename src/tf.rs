@@ -9,6 +9,10 @@ pub struct TorrentFile {
     pub announce_list: Option<Vec<Vec<String>>>,
     pub info: Info,
     pub info_hash: InfoHash,
+    pub creation_date: Option<u32>,
+    pub comment: Option<String>,
+    pub created: Option<String>,
+    pub encoding: Option<String>,
 }
 
 impl FromBencode for TorrentFile {
@@ -19,6 +23,10 @@ impl FromBencode for TorrentFile {
         let mut announce_list = None;
         let mut info = None;
         let mut info_hash = None;
+        let mut creation_date = None;
+        let mut comment = None;
+        let mut created = None;
+        let mut encoding = None;
 
         let mut dict = object.try_into_dictionary()?;
         while let Some(pair) = dict.next_pair()? {
@@ -38,6 +46,26 @@ impl FromBencode for TorrentFile {
 
                     info_hash = Some(InfoHash::new(i));
                     info = Some(Info::from_bencode(i))
+                }
+                (b"creation_date", value) => {
+                    creation_date = u32::decode_bencode_object(value)
+                        .context("creation_date")
+                        .map(Some)?;
+                }
+                (b"comment", value) => {
+                    comment = String::decode_bencode_object(value)
+                        .context("comment")
+                        .map(Some)?;
+                }
+                (b"created", value) => {
+                    created = String::decode_bencode_object(value)
+                        .context("created")
+                        .map(Some)?;
+                }
+                (b"encoding", value) => {
+                    encoding = String::decode_bencode_object(value)
+                        .context("encoding")
+                        .map(Some)?;
                 }
                 (unknown_field, _) => {
                     println!(
@@ -60,6 +88,10 @@ impl FromBencode for TorrentFile {
             announce_list,
             info,
             info_hash,
+            creation_date,
+            comment,
+            created,
+            encoding,
         })
     }
 }
@@ -68,10 +100,10 @@ impl fmt::Display for TorrentFile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "\x1b[1mTorrent File\x1b[0m\nannounce: {}\ninfo_hash: {}\ninfo: {}\nannounce_list {:?}",
-            self.announce,
-            self.info_hash.as_string(),
+            "\x1b[1mTorrent File\x1b[0m\ninfo: {}\ninfo_hash: {}\nannounce: {}\nannounce_list {:?}",
             self.info,
+            self.info_hash.as_string(),
+            self.announce,
             self.announce_list,
         )
     }
@@ -141,7 +173,10 @@ impl FromBencode for Info {
                 }
                 (b"pieces", value) => {
                     //pieces is not human readable, so we can't put it to String
-                    pieces = Some(value.try_into_bytes().unwrap().to_vec());
+                    let value = value.try_into_bytes().unwrap().to_vec();
+                    if value.len() % 20 == 0 {
+                        pieces = Some(value);
+                    }
                 }
                 // (b"profiles", value) => {
                 //     profiles = Vec::<Profile>::decode_bencode_object(value)
@@ -207,8 +242,8 @@ impl fmt::Display for Info {
         }
         write!(
             f,
-            "length: {}\nname: {}\npieces count: {}, piece length: {}",
-            self.length, self.name, piece_count, self.piece_length,
+            "name: {}\nlength: {}\npieces count: {}, piece length: {}",
+            self.name, self.length, piece_count, self.piece_length,
         )
     }
 }
