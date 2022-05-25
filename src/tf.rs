@@ -117,6 +117,7 @@ pub struct Info {
     pub name: String,
     pub piece_length: u32,
     pieces: Vec<u8>,
+    pub files: Vec<File>,
     //profiles: Vec<Profile>, //?
 }
 
@@ -136,10 +137,11 @@ impl FromBencode for Info {
     fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
         // let mut file_duration = None;
         // let mut file_media = None;
-        let mut length = None;
+        let mut len = None;
         let mut name = None;
         let mut piece_length = None;
         let mut pieces = None;
+        let mut files = vec![];
         // let mut profiles = None;
 
         let mut dict = object.try_into_dictionary()?;
@@ -157,7 +159,7 @@ impl FromBencode for Info {
                 //         .map(Some)?;
                 // }
                 (b"length", value) => {
-                    length = usize::decode_bencode_object(value)
+                    len = usize::decode_bencode_object(value)
                         .context("length")
                         .map(Some)?;
                 }
@@ -178,6 +180,15 @@ impl FromBencode for Info {
                         pieces = Some(value);
                     }
                 }
+                (b"files", value) => {
+                    let mut value = value.try_into_list().unwrap();
+                    while let Some(d) = value.next_object()? {
+                        let d = d.try_into_dictionary().unwrap().into_raw().unwrap();
+
+                        let file = File::from_bencode(d)?;
+                        files.push(file);
+                    }
+                }
                 // (b"profiles", value) => {
                 //     profiles = Vec::<Profile>::decode_bencode_object(value)
                 //         .context("profiles")
@@ -195,11 +206,24 @@ impl FromBencode for Info {
         //let file_duration =
         //    file_duration.ok_or_else(|| DecodeError::missing_field("file_duration"))?;
         //let file_media = file_media.ok_or_else(|| DecodeError::missing_field("file_media"))?;
-        let length = length.ok_or_else(|| DecodeError::missing_field("length"))?;
         let name = name.ok_or_else(|| DecodeError::missing_field("name"))?;
         let piece_length =
             piece_length.ok_or_else(|| DecodeError::missing_field("piece_length"))?;
         let pieces = pieces.ok_or_else(|| DecodeError::missing_field("pieces"))?;
+        let mut length = 0;
+        if len == None && files.len() != 0 {
+            for f in &files {
+                length += f.length
+            }
+        } else {
+            length = len.ok_or_else(|| DecodeError::missing_field("length"))?;
+        }
+        if files.len() == 0 {
+            files.push(File {
+                length: length,
+                path: name.clone(),
+            });
+        }
         //let profiles = profiles.ok_or_else(|| DecodeError::missing_field("profiles"))?;
 
         Ok(Info {
@@ -209,7 +233,7 @@ impl FromBencode for Info {
             name,
             piece_length,
             pieces,
-            //profiles,
+            files, //profiles,
         })
     }
 }
@@ -240,10 +264,14 @@ impl fmt::Display for Info {
         for i in (0..self.pieces.len()).step_by(20) {
             pieces_str = format!("{}{:?}\n", pieces_str, &self.pieces[i..(i + 20)])
         }
+        let mut files = String::new();
+        for f in &self.files {
+            files += &format!("{} \x1b[1m{}\x1b[0m\n", f.path, f.length)
+        }
         write!(
             f,
-            "name: {}\nlength: {}\npieces count: {}, piece length: {}",
-            self.name, self.length, piece_count, self.piece_length,
+            "name: {}\nlength: {}\npieces count: {}, piece length: {}\nfiles:\n{}",
+            self.name, self.length, piece_count, self.piece_length, files
         )
     }
 }
@@ -281,6 +309,52 @@ impl InfoHash {
             hash += &format!("%{:02X}", &self.hash[i]);
         }
         return hash;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct File {
+    length: usize,
+    path: String,
+}
+
+impl FromBencode for File {
+    //const EXPECTED_RECURSION_DEPTH: usize = 1;
+
+    fn decode_bencode_object(object: Object) -> Result<Self, DecodeError> {
+        let mut length = None;
+        let mut path = None;
+
+        let mut dict = object.try_into_dictionary()?;
+        while let Some(pair) = dict.next_pair()? {
+            match pair {
+                (b"length", value) => {
+                    length = usize::decode_bencode_object(value)
+                        .context("length")
+                        .map(Some)?;
+                }
+                (b"path", value) => {
+                    let p = Vec::<String>::decode_bencode_object(value).context("path")?;
+                    let mut ps = String::new();
+                    for s in p {
+                        ps.push_str("/");
+                        ps.push_str(&s);
+                    }
+                    path = Some(ps);
+                }
+                (unknown_field, _) => {
+                    println!(
+                        "Not done in File -{:?}",
+                        String::from_utf8_lossy(unknown_field)
+                    );
+                }
+            }
+        }
+
+        let length = length.ok_or_else(|| DecodeError::missing_field("length"))?;
+        let path = path.ok_or_else(|| DecodeError::missing_field("path"))?;
+
+        Ok(File { length, path })
     }
 }
 

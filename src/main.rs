@@ -23,6 +23,7 @@ fn main() {
     let mut file;
     let file_path = format!("downloads/{}", &tf.info.name);
     let path = std::path::Path::new(&file_path);
+    return;
 
     if path.exists() {
         let mut oo = OpenOptions::new();
