@@ -22,8 +22,6 @@ fn main() {
 
     preallocate(&tf);
     let missing_pieces = check_file_hash(&tf);
-    return;
-    /*
 
     println!("missing_pieces {:?}", missing_pieces);
 
@@ -41,9 +39,8 @@ fn main() {
 
     while missing_pieces.len() > 0 {
         let s = streams.next();
-        download_from_peer(s.unwrap(), &file, &tf, missing_pieces.iter())
+        download_from_peer(s.unwrap(), &tf, missing_pieces.iter())
     }
-    */
 }
 
 fn preallocate(tf: &TorrentFile) {
@@ -67,31 +64,14 @@ fn preallocate(tf: &TorrentFile) {
         if let Some(dir_path) = file.path.as_path().parent() {
             fs::create_dir_all(dir_path);
         }
-        if file.path.exists() {
-            let mut oo = OpenOptions::new();
-            oo.read(true);
-            oo.write(true);
 
-            let file_length = file.path.metadata().unwrap().len();
-            if file_length < file.length.try_into().unwrap() {
-                oo.append(true);
-            }
-            let mut f = oo.open(file.path).unwrap();
-
-            if file_length < file.length.try_into().unwrap() {
-                f.write_all(&vec![0; file.length - file_length as usize])
-                    .unwrap();
-            }
-        } else {
-            //preallocate file
-            let mut f = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(file.path)
-                .unwrap();
-            f.write_all(&vec![0; file.length]).unwrap();
-        }
+        //preallocate file
+        let f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(file.path)
+            .unwrap();
+        f.set_len(file.length as u64).unwrap();
     }
     println!("Preallocation complete");
 }
@@ -108,18 +88,26 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream
         let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(2));
 
         if let Ok(mut s) = stream {
+            s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
             //writing handhsake
+            println!("stream {:?}", s);
             let mut arr = vec![19];
             arr.extend(b"BitTorrent protocol");
             arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
             arr.extend(tf.info_hash.raw());
             arr.extend(b"-tT0001-004815162342"); //12 rand numbers at the end TODO
-            s.write(&arr).expect("Couldn't write buffer; Handshake"); //28
-
+            let _r = s.write(&arr).expect("Couldn't write buffer; Handshake"); //28
+            println!("R {:?}", _r);
             //reading handshake
             let mut handshake_buff = [0u8; 68];
-            s.read(&mut handshake_buff)
-                .expect("Couldn't read buffer; Handshake");
+            let _r = s.read(&mut handshake_buff);
+
+            if let Err(e) = _r {
+                println!("Couldn't read buffer; Handshake");
+                println!("{:?}", e);
+                continue;
+            }
+
             println!(
                 "{};\n extentions {:?}\n info_hash {}\n vs our    {}\n peer id {} ({})",
                 String::from_utf8_lossy(&handshake_buff[1..20]),
@@ -138,17 +126,13 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream
             streams.push(s);
         } else {
             println!("Failed!");
+            println!("{:?}", stream);
         }
     }
     streams
 }
 
-fn download_from_peer(
-    mut s: &TcpStream,
-    mut file: &File,
-    tf: &TorrentFile,
-    mut missing_pieces: Iter<usize>,
-) {
+fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: Iter<usize>) {
     //reading actuall data
     s.set_read_timeout(Some(Duration::from_secs(15))).unwrap(); //safe unwrap
 
@@ -270,7 +254,42 @@ fn download_from_peer(
                     } else {
                         println!("Correct hash!");
                     }
+                    //==========
+                    let (mut of, files) = tf.info.get_piece_files(*pn);
 
+                    let mut prev_written_bytes = 0;
+                    for file in files {
+                        let file_path = format!("downloads/{}", &tf.info.name);
+                        let path = std::path::Path::new(&file_path);
+                        let mut fc = file.clone();
+                        fc.path = path.join(file.path.clone());
+                        println!("{:?}", file);
+                        println!("offset {:?}", of);
+                        let mut f = OpenOptions::new().write(true).open(fc.path).unwrap();
+
+                        f.seek(SeekFrom::Start(of as u64)).expect("seek failed");
+                        println!("piece len {:?}", piece.len());
+
+                        let how_much = std::cmp::min(
+                            file.length - of,
+                            tf.info.piece_length as usize - prev_written_bytes,
+                        );
+                        let written = f.write(&piece[..how_much]);
+                        match written {
+                            Ok(count) => {
+                                println!("Written {:?} bytes", count);
+                                prev_written_bytes = count;
+                                piece.drain(..count);
+                                of = 0;
+                            }
+                            Err(e) => {
+                                println!("Write failed\n{:?}", e);
+                            }
+                        }
+                        //println!("Piece {:?}", &piece);
+                    }
+                    //=======
+                    /*
                     println!(
                         "SEEEEEK OFFSET {:?}",
                         *pn as u64 * (tf.info.piece_length as u64)
@@ -278,6 +297,7 @@ fn download_from_peer(
                     file.seek(SeekFrom::Start(*pn as u64 * (tf.info.piece_length as u64)))
                         .expect("seek failed");
                     file.write_all(&piece).expect("write failed");
+                    */
                     piece.drain(..);
 
                     pn = missing_pieces.next().unwrap();
