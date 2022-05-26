@@ -101,11 +101,9 @@ impl fmt::Display for TorrentFile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "\x1b[1mTorrent File\x1b[0m\ninfo: {}\ninfo_hash: {}\nannounce: {}\nannounce_list {:?}",
+            "{}info_hash: {}\n",
             self.info,
             self.info_hash.as_string(),
-            self.announce,
-            self.announce_list,
         )
     }
 }
@@ -289,19 +287,14 @@ impl ToBencode for Info {
 
 impl fmt::Display for Info {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let piece_count = self.pieces.len() / 20;
-        let mut pieces_str = String::new();
-        for i in (0..self.pieces.len()).step_by(20) {
-            pieces_str = format!("{}{:?}\n", pieces_str, &self.pieces[i..(i + 20)])
-        }
         let mut files = String::new();
         for f in &self.files {
-            files += &format!("{} \x1b[1m{}\x1b[0m\n", f.path.display(), f.length)
+            files += &format!(" - {} \x1b[1m{}\x1b[0m\n", f.path.display(), f.length)
         }
         write!(
             f,
-            "name: {}\nlength: {}\npieces count: {}, piece length: {}\nfiles:\n{}",
-            self.name, self.length, piece_count, self.piece_length, files
+            "\x1b[1m{}\x1b[0m\nLength: \x1b[1m{}\x1b[0m\nFiles:\n{}",
+            self.name, self.length, files
         )
     }
 }

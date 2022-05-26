@@ -2,8 +2,8 @@ use bendy::decoding::FromBencode;
 use sha1::{Digest, Sha1};
 use std::env;
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::fs::OpenOptions;
+use std::io::{stdout, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::slice::Iter;
 use std::time::Duration;
@@ -14,16 +14,15 @@ mod tracker;
 use crate::tracker::*;
 
 fn main() {
+    println!("\x1b]0;tTorrent\x07");
     let args: Vec<String> = env::args().collect();
     let x = fs::read(&args[1]).unwrap();
 
     let tf = TorrentFile::from_bencode(&x).unwrap();
-    println!("\n{}\n", tf);
+    println!("{}", tf);
 
     preallocate(&tf);
     let missing_pieces = check_file_hash(&tf);
-
-    println!("missing_pieces {:?}", missing_pieces);
 
     let r = connect_to_tracker(&tf, false);
     if r.is_none() {
@@ -54,7 +53,6 @@ fn preallocate(tf: &TorrentFile) {
         }
     );
     let path = std::path::Path::new(&file_path);
-    fs::create_dir(path);
     //TODO ok wtf did i do here?
     let files: Vec<tf::File> = tf
         .info
@@ -69,7 +67,7 @@ fn preallocate(tf: &TorrentFile) {
 
     for file in files {
         if let Some(dir_path) = file.path.as_path().parent() {
-            fs::create_dir_all(dir_path);
+            fs::create_dir_all(dir_path).unwrap();
         }
 
         //preallocate file
@@ -87,31 +85,25 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream
     let mut streams = vec![];
 
     for i in 0..respone.peers.len() {
-        println!("{}", respone.peers[i]);
-    }
-    println!("=================");
-    for i in 0..respone.peers.len() {
-        println!("Trying {}", respone.peers[i]);
+        print!("Trying {} ", respone.peers[i]);
+        stdout().flush().unwrap();
         let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(2));
 
         if let Ok(mut s) = stream {
             s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
             //writing handhsake
-            println!("stream {:?}", s);
             let mut arr = vec![19];
             arr.extend(b"BitTorrent protocol");
             arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
             arr.extend(tf.info_hash.raw());
             arr.extend(b"-tT0001-004815162342"); //12 rand numbers at the end TODO
-            let _r = s.write(&arr).expect("Couldn't write buffer; Handshake"); //28
-            println!("R {:?}", _r);
+            let _r = s.write(&arr).expect("Couldn't write buffer; Handshake");
             //reading handshake
             let mut handshake_buff = [0u8; 68];
             let _r = s.read(&mut handshake_buff);
 
-            if let Err(e) = _r {
-                println!("Couldn't read buffer; Handshake");
-                println!("{:?}", e);
+            if let Err(_e) = _r {
+                println!("\x1b[91mCouldn't read buffer; Handshake\x1b[0m");
                 continue;
             }
 
@@ -126,14 +118,13 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream
             );
 
             if &handshake_buff[28..48] != tf.info_hash.raw() {
-                println!("Invalid info hash!");
+                println!("\x1b[91mInvalid info hash!\x1b[0m");
                 continue;
             }
 
             streams.push(s);
         } else {
-            println!("Failed!");
-            println!("{:?}", stream);
+            println!("\x1b[91mFailed!\x1b[0m");
         }
     }
     streams
@@ -176,6 +167,9 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
                     let r = s.write(&[0, 0, 0, 0]);
                     match r {
                         Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                        Err(e) if e.kind() == ErrorKind::ConnectionAborted => {
+                            println!("\x1b[91mConnection aborted\x1b[0m");
+                        }
                         Err(e) => println!("Error writing buffer: {:?}", e),
                         _ => {}
                     }
@@ -223,6 +217,7 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
             1 => {
                 println!("unchoke");
                 peer_status.2 = false;
+                println!("\x1b[1mRequesting piece {}\x1b[0m", pn);
             }
             2 => println!("interested"),
             3 => println!("not interested"),
@@ -230,8 +225,8 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
             5 => println!("bitfield\n {:?}", &message_buf[1..]),
             6 => println!("request"),
             7 => {
-                println!(
-                    "Got piece {} of {} ({}%), offset {}/{} ({}%)",
+                print!(
+                    "\x1b[1M\rGot piece {} of {} ({}%), offset {}/{} ({}%)",
                     big_endian_to_u32(&message_buf[1..5].try_into().unwrap()),
                     piece_count,
                     (big_endian_to_u32(&message_buf[1..5].try_into().unwrap()) as f32
@@ -243,9 +238,8 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
                         as f32
                         / (pl as f32 / 100.0)) as u32
                 );
+                stdout().flush().unwrap();
                 piece.append(&mut message_buf[9..].to_vec());
-
-                println!("piece.len() {:?} == piece_length {}", piece.len(), pl);
 
                 //if whole piece is downloaded
                 if piece.len() == pl.try_into().unwrap() {
@@ -255,11 +249,11 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
                     let hexes = hasher.finalize();
                     let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
                     if hexes != tf.info.get_piece_hash(*pn) {
-                        println!("Hash doesn't match!");
+                        println!(" \x1b[91mHash doesn't match!\x1b[0m");
                         offset = 0;
                         continue;
                     } else {
-                        println!("Correct hash!");
+                        println!(" \x1b[92mCorrect hash!\x1b[0m");
                     }
                     //==========
                     let (mut of, files) = tf.info.get_piece_files(*pn);
@@ -277,12 +271,9 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
                         let path = std::path::Path::new(&file_path);
                         let mut fc = file.clone();
                         fc.path = path.join(file.path.clone());
-                        println!("{:?}", file);
-                        println!("offset {:?}", of);
                         let mut f = OpenOptions::new().write(true).open(fc.path).unwrap();
 
                         f.seek(SeekFrom::Start(of as u64)).expect("seek failed");
-                        println!("piece len {:?}", piece.len());
 
                         let how_much = std::cmp::min(
                             file.length - of,
@@ -291,7 +282,6 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
                         let written = f.write(&piece[..how_much]);
                         match written {
                             Ok(count) => {
-                                println!("Written {:?} bytes", count);
                                 prev_written_bytes = count;
                                 piece.drain(..count);
                                 of = 0;
@@ -316,12 +306,13 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
 
                     pn = missing_pieces.next().unwrap();
                     offset = 0;
+                    println!("\x1b[1mRequesting piece {}\x1b[0m", pn);
 
                     if pn > &piece_count {
                         break;
                     }
                 }
-                println!("");
+                //println!("");
             }
             8 => println!("cancel"),
             9 => println!("port"),
@@ -349,15 +340,16 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
                     16384
                 };
             }
-            request_message.append(&mut block_size.to_be_bytes().to_vec()); //piece length
-            println!(
+            //piece length
+            request_message.append(&mut block_size.to_be_bytes().to_vec());
+            /*println!(
                 "\x1b[1mRequesting piece {}\x1b[0m, offset {}, block size {} bytes",
                 pn, offset, block_size
-            );
+            );*/
             match s.write(&request_message) {
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    println!("Error writing buffer: {:?}", e);
+                    println!("\x1b[91mError writing buffer: {}\x1b[0m", e.to_string());
                     continue;
                 }
                 _ => {}
@@ -367,8 +359,9 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
     }
 }
 
-//todo check this fn it can be better
+//todo check this fn it can be better, this is way too slow (268435456)
 fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
+    println!("Checking files hash");
     let piece_count = tf.info.length / tf.info.piece_length as usize;
     let mut read_buf = Vec::with_capacity(tf.info.piece_length as usize);
     let mut missing_pieces = vec![];
@@ -377,7 +370,6 @@ fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
     for p in 0..piece_count + 1 {
         let (offset, files) = tf.info.get_piece_files(p);
 
-        println!("{:?}", files);
         let mut first = true;
         let mut r = 0;
         for file in files {
@@ -404,9 +396,6 @@ fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
                 .take(tf.info.piece_length as u64 - r as u64)
                 .read_to_end(&mut read_buf)
                 .unwrap();
-
-            println!("read_buf len {:?}", read_buf.len());
-            println!("r {:?}", r);
         }
 
         hasher.update(&read_buf);
@@ -416,12 +405,15 @@ fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
         let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
 
         if hexes != tf.info.get_piece_hash(p) {
-            println!("piece {}; Hash doesn't match!", p);
+            print!("\x1b[91m");
             missing_pieces.push(p);
         } else {
-            println!("piece {}; Correct hash!", p);
+            print!("\x1b[92m");
         }
+        print!("{} ", p);
+        stdout().flush().unwrap();
     }
+    println!("\x1b[0m");
     missing_pieces
 }
 
