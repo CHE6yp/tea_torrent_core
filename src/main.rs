@@ -45,7 +45,14 @@ fn main() {
 
 fn preallocate(tf: &TorrentFile) {
     println!("Preallocating files");
-    let file_path = format!("downloads/{}", &tf.info.name);
+    let file_path = format!(
+        "downloads/{}",
+        if tf.info.files.len() > 1 {
+            &tf.info.name
+        } else {
+            ""
+        }
+    );
     let path = std::path::Path::new(&file_path);
     fs::create_dir(path);
     //TODO ok wtf did i do here?
@@ -259,7 +266,14 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
 
                     let mut prev_written_bytes = 0;
                     for file in files {
-                        let file_path = format!("downloads/{}", &tf.info.name);
+                        let file_path = format!(
+                            "downloads/{}",
+                            if tf.info.files.len() > 1 {
+                                &tf.info.name
+                            } else {
+                                ""
+                            }
+                        );
                         let path = std::path::Path::new(&file_path);
                         let mut fc = file.clone();
                         fc.path = path.join(file.path.clone());
@@ -365,26 +379,34 @@ fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
 
         println!("{:?}", files);
         let mut first = true;
+        let mut r = 0;
         for file in files {
-            let file_path = format!("downloads/{}", &tf.info.name);
+            let file_path = format!(
+                "downloads/{}",
+                if tf.info.files.len() > 1 {
+                    &tf.info.name
+                } else {
+                    ""
+                }
+            );
             let path = std::path::Path::new(&file_path);
             let mut fc = file.clone();
             fc.path = path.join(file.path.clone());
 
-            let mut f = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(fc.path)
-                .unwrap();
+            let mut f = OpenOptions::new().read(true).open(fc.path).unwrap();
 
             if first {
                 f.seek(SeekFrom::Start(offset as u64)).expect("seek failed");
                 first = false;
             }
 
-            f.take(tf.info.piece_length as u64)
+            r += f
+                .take(tf.info.piece_length as u64 - r as u64)
                 .read_to_end(&mut read_buf)
                 .unwrap();
+
+            println!("read_buf len {:?}", read_buf.len());
+            println!("r {:?}", r);
         }
 
         hasher.update(&read_buf);
