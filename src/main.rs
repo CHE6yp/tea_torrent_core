@@ -6,7 +6,9 @@ use std::fs::OpenOptions;
 use std::io::{stdout, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::slice::Iter;
+use std::sync::mpsc::channel;
 use std::time::Duration;
+use threadpool::ThreadPool;
 
 mod tf;
 use crate::tf::*;
@@ -363,11 +365,14 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
 fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
     println!("Checking files hash");
     let piece_count = tf.info.length / tf.info.piece_length as usize;
-    let mut read_buf = Vec::with_capacity(tf.info.piece_length as usize);
     let mut missing_pieces = vec![];
-    let mut hasher = Sha1::new();
+
+    let pool = ThreadPool::new(9);
+
+    let (tx, rx) = channel();
 
     for p in 0..piece_count + 1 {
+        let mut read_buf = Vec::with_capacity(tf.info.piece_length as usize);
         let (offset, files) = tf.info.get_piece_files(p);
 
         let mut first = true;
@@ -397,13 +402,21 @@ fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
                 .read_to_end(&mut read_buf)
                 .unwrap();
         }
+        let tx = tx.clone();
 
-        hasher.update(&read_buf);
-        let hexes = hasher.finalize_reset();
+        pool.execute(move || {
+            let mut hasher = Sha1::new();
 
-        read_buf.drain(..);
-        let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
+            hasher.update(&read_buf);
+            let hexes = hasher.finalize();
 
+            let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
+            tx.send((p, hexes))
+                .expect("channel will be there waiting for the pool");
+        });
+    }
+
+    rx.iter().take(piece_count + 1).for_each(|(p, hexes)| {
         if hexes != tf.info.get_piece_hash(p) {
             print!("\x1b[91m");
             missing_pieces.push(p);
@@ -412,7 +425,8 @@ fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
         }
         print!("{} ", p);
         stdout().flush().unwrap();
-    }
+    });
+
     println!("\x1b[0m");
     missing_pieces
 }
