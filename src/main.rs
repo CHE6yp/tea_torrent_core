@@ -7,6 +7,7 @@ use std::io::{stdout, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::slice::Iter;
 use std::sync::mpsc::channel;
+use std::sync::Arc;
 use std::time::Duration;
 use threadpool::ThreadPool;
 
@@ -85,50 +86,85 @@ fn preallocate(tf: &TorrentFile) {
 
 fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream> {
     let mut streams = vec![];
+    let pool = ThreadPool::new(9);
+    let (tx, rx) = channel();
+    let respone = Arc::new(respone);
+
+    #[derive(Debug)]
+    enum Result {
+        Done(TcpStream),
+        Timeout,
+        InvalidHash,
+    }
 
     for i in 0..respone.peers.len() {
-        print!("Trying {} ", respone.peers[i]);
-        stdout().flush().unwrap();
-        let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(2));
+        let mut info_hash = [0; 20];
+        //TODO look into arcing this instead if cloning
+        //maybe i need scoped threads?
+        info_hash.clone_from_slice(tf.info_hash.raw());
+        let respone = Arc::clone(&respone);
+        let tx = tx.clone();
 
-        if let Ok(mut s) = stream {
-            s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-            //writing handhsake
-            let mut arr = vec![19];
-            arr.extend(b"BitTorrent protocol");
-            arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
-            arr.extend(tf.info_hash.raw());
-            arr.extend(b"-tT0001-004815162342"); //12 rand numbers at the end TODO
-            let _r = s.write(&arr).expect("Couldn't write buffer; Handshake");
-            //reading handshake
-            let mut handshake_buff = [0u8; 68];
-            let _r = s.read(&mut handshake_buff);
+        pool.execute(move || {
+            stdout().flush().unwrap();
+            let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(2));
 
-            if let Err(_e) = _r {
-                println!("\x1b[91mCouldn't read buffer; Handshake\x1b[0m");
-                continue;
+            if let Ok(mut s) = stream {
+                s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+                //writing handhsake
+                let mut arr = vec![19];
+                arr.extend(b"BitTorrent protocol");
+                arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
+                arr.extend(info_hash);
+                arr.extend(b"-tT0001-004815162342"); //12 rand numbers at the end TODO
+                let _r = s.write(&arr).expect("Couldn't write buffer; Handshake");
+                //reading handshake
+                let mut handshake_buff = [0u8; 68];
+                let _r = s.read(&mut handshake_buff);
+
+                if let Err(_e) = _r {
+                    tx.send((Result::Timeout, respone.peers[i]))
+                        .expect("channel will be there waiting for the pool");
+                    return;
+                }
+                if &handshake_buff[28..48] != info_hash {
+                    tx.send((Result::InvalidHash, respone.peers[i]))
+                        .expect("channel will be there waiting for the pool");
+                    return;
+                }
+                tx.send((Result::Done(s), respone.peers[i]))
+                    .expect("channel will be there waiting for the pool");
+            } else {
+                tx.send((Result::Timeout, respone.peers[i]))
+                    .expect("channel will be there waiting for the pool");
             }
-
-            println!(
-                "{};\n extentions {:?}\n info_hash {}\n vs our    {}\n peer id {} ({})",
-                String::from_utf8_lossy(&handshake_buff[1..20]),
-                &handshake_buff[20..28],
-                String::from_utf8_lossy(&handshake_buff[28..48]),
-                String::from_utf8_lossy(tf.info_hash.raw()),
-                String::from_utf8_lossy(&handshake_buff[48..68]),
-                try_parse_client(&handshake_buff[48..68])
-            );
-
-            if &handshake_buff[28..48] != tf.info_hash.raw() {
-                println!("\x1b[91mInvalid info hash!\x1b[0m");
-                continue;
-            }
-
-            streams.push(s);
-        } else {
-            println!("\x1b[91mFailed!\x1b[0m");
-        }
+        });
     }
+
+    rx.iter().take(respone.peers.len()).for_each(|(res, peer)| {
+        print!("{} ", peer);
+        match res {
+            Result::Done(s) => {
+                println!("\x1b[1mDone!\x1b[0m");
+                streams.push(s);
+            }
+            Result::Timeout => {
+                println!("\x1b[91mFailed!\x1b[0m");
+            }
+            Result::InvalidHash => {
+                // println!(
+                //     "{};\n extentions {:?}\n info_hash {}\n vs our    {}\n peer id {} ({})",
+                //     String::from_utf8_lossy(&handshake_buff[1..20]),
+                //     &handshake_buff[20..28],
+                //     String::from_utf8_lossy(&handshake_buff[28..48]),
+                //     String::from_utf8_lossy(&info_hash),
+                //     String::from_utf8_lossy(&handshake_buff[48..68]),
+                //     try_parse_client(&handshake_buff[48..68])
+                // );
+                println!("\x1b[91mInvalid info hash!\x1b[0m");
+            }
+        }
+    });
     streams
 }
 
