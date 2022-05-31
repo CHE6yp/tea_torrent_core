@@ -41,7 +41,7 @@ fn main() {
 
     while missing_pieces.len() > 0 {
         let s = streams.next();
-        download_from_peer(s.unwrap(), &tf, missing_pieces.iter())
+        download_from_peer(&s.unwrap().stream, &tf, missing_pieces.iter())
     }
 }
 
@@ -84,7 +84,7 @@ fn preallocate(tf: &TorrentFile) {
     println!("Preallocation complete");
 }
 
-fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream> {
+fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
     let mut streams = vec![];
     let pool = ThreadPool::new(9);
     let (tx, rx) = channel();
@@ -92,16 +92,17 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream
 
     #[derive(Debug)]
     enum Result {
-        Done(TcpStream),
+        Done(Peer),
         Timeout,
         InvalidHash,
     }
 
+    //TODO look into arcing this instead if cloning
+    //maybe i need scoped threads?
+    let mut info_hash = [0; 20];
+    info_hash.clone_from_slice(tf.info_hash.raw());
+
     for i in 0..respone.peers.len() {
-        let mut info_hash = [0; 20];
-        //TODO look into arcing this instead if cloning
-        //maybe i need scoped threads?
-        info_hash.clone_from_slice(tf.info_hash.raw());
         let respone = Arc::clone(&respone);
         let tx = tx.clone();
 
@@ -132,7 +133,14 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<TcpStream
                         .expect("channel will be there waiting for the pool");
                     return;
                 }
-                tx.send((Result::Done(s), respone.peers[i]))
+                let mut peer_id = [0; 20];
+                peer_id.clone_from_slice(&handshake_buff[48..68]);
+                tx.send((Result::Done(Peer {
+                    id: peer_id,
+                    stream: s,
+                    bitfield: vec![],
+                    status: (true, false, true, false)
+                }), respone.peers[i]))
                     .expect("channel will be there waiting for the pool");
             } else {
                 tx.send((Result::Timeout, respone.peers[i]))
@@ -576,4 +584,16 @@ fn try_parse_client(peer_info: &[u8]) -> String {
         b"ZT" => String::from("ZipTorrent"),
         _ => String::from("unknown client"),
     }
+}
+
+#[derive(Debug)]
+struct Peer {
+    id: [u8;20],
+    stream: TcpStream,
+    bitfield: Vec<u8>,
+    status: (bool,bool,bool,bool)
+}
+
+impl Peer {
+    // add code here
 }
