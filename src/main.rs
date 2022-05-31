@@ -8,6 +8,8 @@ use std::net::TcpStream;
 use std::slice::Iter;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
 use std::time::Duration;
 use threadpool::ThreadPool;
 
@@ -15,6 +17,8 @@ mod tf;
 use crate::tf::*;
 mod tracker;
 use crate::tracker::*;
+
+const BLOCK_SIZE: u32 = 16384;
 
 fn main() {
     println!("\x1b]0;tTorrent\x07");
@@ -36,13 +40,28 @@ fn main() {
     let respone = r.unwrap();
     println!("Connection complete, connecting to peers");
 
-    let streams = connect_to_peers(respone, &tf);
-    let mut streams = streams.iter();
+    let peers = connect_to_peers(respone, &tf);
+    // let mut peers = peers.iter();
 
-    while missing_pieces.len() > 0 {
-        let s = streams.next();
-        download_from_peer(&s.unwrap().stream, &tf, missing_pieces.iter())
+    let mut handles: Vec<thread::JoinHandle<_>> = vec![];
+    for peer in peers {
+        let peer = Arc::new(Mutex::new(peer));
+        let join_handle = thread::spawn(move || loop {
+            peer.lock().unwrap().get_message();
+        });
+        handles.push(join_handle);
     }
+
+    for handle in handles {
+        handle.join();
+    }
+    // thread_joiner.join();
+
+    // while missing_pieces.len() > 0 {
+    //     // let s= peers.next().unwrap();
+    //     // download_from_peer(&s.unwrap().stream, &tf, missing_pieces.iter())
+    //     peers[0].get_message()
+    // }
 }
 
 fn preallocate(tf: &TorrentFile) {
@@ -90,7 +109,6 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
     let (tx, rx) = channel();
     let respone = Arc::new(respone);
 
-    #[derive(Debug)]
     enum Result {
         Done(Peer),
         Timeout,
@@ -111,7 +129,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
             let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(2));
 
             if let Ok(mut s) = stream {
-                s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+                //s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
                 //writing handhsake
                 let mut arr = vec![19];
                 arr.extend(b"BitTorrent protocol");
@@ -135,13 +153,16 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
                 }
                 let mut peer_id = [0; 20];
                 peer_id.clone_from_slice(&handshake_buff[48..68]);
-                tx.send((Result::Done(Peer {
-                    id: peer_id,
-                    stream: s,
-                    bitfield: vec![],
-                    status: (true, false, true, false)
-                }), respone.peers[i]))
-                    .expect("channel will be there waiting for the pool");
+                tx.send((
+                    Result::Done(Peer {
+                        id: peer_id,
+                        stream: s,
+                        bitfield: vec![],
+                        status: (true, false, true, false),
+                    }),
+                    respone.peers[i],
+                ))
+                .expect("channel will be there waiting for the pool");
             } else {
                 tx.send((Result::Timeout, respone.peers[i]))
                     .expect("channel will be there waiting for the pool");
@@ -153,7 +174,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
         print!("{} ", peer);
         match res {
             Result::Done(s) => {
-                println!("\x1b[1mDone!\x1b[0m");
+                println!("\x1b[1mDone!\x1b[0m {}", s.try_parse_client());
                 streams.push(s);
             }
             Result::Timeout => {
@@ -176,6 +197,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
     streams
 }
 
+#[allow(dead_code)]
 fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: Iter<usize>) {
     //reading actuall data
     s.set_read_timeout(Some(Duration::from_secs(15))).unwrap(); //safe unwrap
@@ -186,7 +208,7 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
     let mut pl: u32 = tf.info.piece_length as u32;
     let piece_count = tf.info.length / tf.info.piece_length as usize;
     //16Kb more than that doesn't work somehow, BEP 52 or something,
-    let mut block_size: u32 = 16384;
+    let mut block_size: u32 = BLOCK_SIZE;
     let mut piece: Vec<u8> = vec![];
     let mut offset: u32 = 0;
 
@@ -377,13 +399,13 @@ fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: I
                     pl = (tf.info.length - ((piece_count) * pl as usize)) as u32;
                 }
                 let left = pl - offset;
-                block_size = if left < 16384 {
+                block_size = if left < BLOCK_SIZE {
                     //bitwise magic! this finds the rightmost bit it last_piece_size
                     // pl & (!(pl - 1))
                     //and this finds the rightmost bit it last_piece_size
                     1 << (31 - left.leading_zeros())
                 } else {
-                    16384
+                    BLOCK_SIZE
                 };
             }
             //piece length
@@ -482,118 +504,252 @@ fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
         + value[3] as u32
 }
 
-fn try_parse_client(peer_info: &[u8]) -> String {
-    let huh = [peer_info[1], peer_info[2]];
-
-    match &huh {
-        b"7T" => String::from("aTorrent for Android"),
-        b"AB" => String::from("AnyEvent::BitTorrent"),
-        b"AG" => String::from("Ares"),
-        b"A~" => String::from("Ares"),
-        b"AR" => String::from("Arctic"),
-        b"AV" => String::from("Avicora"),
-        b"AT" => String::from("Artemis"),
-        b"AX" => String::from("BitPump"),
-        b"AZ" => String::from("Azureus"),
-        b"BB" => String::from("BitBuddy"),
-        b"BC" => String::from("BitComet"),
-        b"BE" => String::from("Baretorrent"),
-        b"BF" => String::from("Bitflu"),
-        b"BG" => String::from("BTG (uses Rasterbar libtorrent)"),
-        b"BL" => String::from("BitCometLite (uses 6 digit version number) or BitBlinder"),
-        b"BP" => String::from("BitTorrent Pro (Azureus + spyware)"),
-        b"BR" => String::from("BitRocket"),
-        b"BS" => String::from("BTSlave"),
-        b"BT" => String::from("mainline BitTorrent (versions >= 7.9) or BBtor"),
-        b"Bt" => String::from("Bt"),
-        b"BW" => String::from("BitWombat"),
-        b"BX" => String::from("~Bittorrent X"),
-        b"CD" => String::from("Enhanced CTorrent"),
-        b"CT" => String::from("CTorrent"),
-        b"DE" => String::from("DelugeTorrent"),
-        b"DP" => String::from("Propagate Data Client"),
-        b"EB" => String::from("EBit"),
-        b"ES" => String::from("electric sheep"),
-        b"FC" => String::from("FileCroc"),
-        b"FD" => String::from("Free Download Manager (versions >= 5.1.12)"),
-        b"FT" => String::from("FoxTorrent"),
-        b"FX" => String::from("Freebox BitTorrent"),
-        b"GS" => String::from("GSTorrent"),
-        b"HK" => String::from("Hekate"),
-        b"HL" => String::from("Halite"),
-        b"HM" => String::from("hMule (uses Rasterbar libtorrent)"),
-        b"HN" => String::from("Hydranode"),
-        b"IL" => String::from("iLivid"),
-        b"JS" => String::from("Justseed.it client"),
-        b"JT" => String::from("JavaTorrent"),
-        b"KG" => String::from("KGet"),
-        b"KT" => String::from("KTorrent"),
-        b"LC" => String::from("LeechCraft"),
-        b"LH" => String::from("LH-ABC"),
-        b"LP" => String::from("Lphant"),
-        b"LT" => String::from("libtorrent"),
-        b"lt" => String::from("libTorrent"),
-        b"LW" => String::from("LimeWire"),
-        b"MK" => String::from("Meerkat"),
-        b"MO" => String::from("MonoTorrent"),
-        b"MP" => String::from("MooPolice"),
-        b"MR" => String::from("Miro"),
-        b"MT" => String::from("MoonlightTorrent"),
-        b"NB" => String::from("Net::BitTorrent"),
-        b"NX" => String::from("Net Transport"),
-        b"OS" => String::from("OneSwarm"),
-        b"OT" => String::from("OmegaTorrent"),
-        b"PB" => String::from("Protocol::BitTorrent"),
-        b"PD" => String::from("Pando"),
-        b"PI" => String::from("PicoTorrent"),
-        b"PT" => String::from("PHPTracker"),
-        b"qB" => String::from("qBittorrent"),
-        b"QD" => String::from("QQDownload"),
-        b"QT" => String::from("Qt 4 Torrent example"),
-        b"RT" => String::from("Retriever"),
-        b"RZ" => String::from("RezTorrent"),
-        b"S~" => String::from("Shareaza alpha/beta"),
-        b"SB" => String::from("~Swiftbit"),
-        b"SD" => String::from("Thunder (aka XùnLéi)"),
-        b"SM" => String::from("SoMud"),
-        b"SP" => String::from("BitSpirit"),
-        b"SS" => String::from("SwarmScope"),
-        b"ST" => String::from("SymTorrent"),
-        b"st" => String::from("sharktorrent"),
-        b"SZ" => String::from("Shareaza"),
-        b"TB" => String::from("Torch"),
-        b"TE" => String::from("terasaur Seed Bank"),
-        b"TL" => String::from("Tribler (versions >= 6.1.0)"),
-        b"TN" => String::from("TorrentDotNET"),
-        b"TR" => String::from("Transmission"),
-        b"TS" => String::from("Torrentstorm"),
-        b"TT" => String::from("TuoTu"),
-        b"UL" => String::from("uLeecher!"),
-        b"UM" => String::from("µTorrent for Mac"),
-        b"UT" => String::from("µTorrent"),
-        b"VG" => String::from("Vagaa"),
-        b"WD" => String::from("WebTorrent Desktop"),
-        b"WT" => String::from("BitLet"),
-        b"WW" => String::from("WebTorrent"),
-        b"WY" => String::from("FireTorrent"),
-        b"XF" => String::from("Xfplay"),
-        b"XL" => String::from("Xunlei"),
-        b"XS" => String::from("XSwifter"),
-        b"XT" => String::from("XanTorrent"),
-        b"XX" => String::from("Xtorrent"),
-        b"ZT" => String::from("ZipTorrent"),
-        _ => String::from("unknown client"),
-    }
-}
-
 #[derive(Debug)]
 struct Peer {
-    id: [u8;20],
+    id: [u8; 20],
     stream: TcpStream,
     bitfield: Vec<u8>,
-    status: (bool,bool,bool,bool)
+    //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
+    status: (bool, bool, bool, bool),
 }
 
 impl Peer {
-    // add code here
+    fn get_message(&mut self) {
+        print!("{} ", String::from_utf8_lossy(&self.id));
+        let mut message_size = [0u8; 4];
+        let package_size = self.stream.read(&mut message_size);
+        match package_size {
+            Ok(_package_size) => {} //println!("package_size {}", package_size),
+            Err(e) => {
+                println!("No package for some secs; read timeout; {}", e);
+
+                println!("Send keep-alive");
+                let r = self.stream.write(&[0, 0, 0, 0]);
+                match r {
+                    Err(e) if e.kind() == ErrorKind::Interrupted => return,
+                    Err(e) if e.kind() == ErrorKind::ConnectionAborted => {
+                        println!("\x1b[91mConnection aborted\x1b[0m");
+                    }
+                    Err(e) => println!("Error writing buffer: {:?}", e),
+                    _ => {}
+                }
+            }
+        }
+
+        let message_size = big_endian_to_u32(&message_size);
+        if message_size == 0 {
+            println!("Got keep alive");
+            return;
+        }
+
+        let mut message_buf = vec![0u8; message_size as usize];
+        self.stream
+            .read_exact(&mut message_buf)
+            .expect("Couldn't read buffer");
+        /*
+            keep-alive: <len=0000>
+            choke: <len=0001><id=0>
+            unchoke: <len=0001><id=1>
+            interested: <len=0001><id=2>
+            not interested: <len=0001><id=3>
+            have: <len=0005><id=4><piece index>
+            bitfield: <len=0001+X><id=5><bitfield>
+            request: <len=0013><id=6><index><begin><length>
+            piece: <len=0009+X><id=7><index><begin><block>
+            cancel: <len=0013><id=8><index><begin><length>
+            port: <len=0003><id=9><listen-port>
+        */
+        match &message_buf[0] {
+            0 => {
+                println!("choke");
+                self.status.2 = true;
+            }
+            1 => {
+                println!("unchoke");
+                self.status.2 = false;
+            }
+            2 => println!("interested"),
+            3 => println!("not interested"),
+            4 => println!("have\n {:?}", &message_buf[1..]),
+            5 => {
+                self.bitfield = (&message_buf[1..]).to_vec();
+                println!("bitfield\n {:?}", &message_buf[1..]);
+            }
+            6 => println!("request"),
+            7 => {
+                let piece_number = big_endian_to_u32(&message_buf[1..5].try_into().unwrap());
+                let offset = big_endian_to_u32(&message_buf[5..9].try_into().unwrap());
+                print!(
+                    "\x1b[1M\rGot piece {} of PIECE COUNT (PERC%), offset {}/PL (PERC%)",
+                    piece_number, offset,
+                );
+                /*
+                stdout().flush().unwrap();
+                piece.append(&mut message_buf[9..].to_vec());
+
+                //if whole piece is downloaded
+                if piece.len() == pl.try_into().unwrap() {
+                    //check hash
+                    let mut hasher = Sha1::new();
+                    hasher.update(&piece);
+                    let hexes = hasher.finalize();
+                    let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
+                    if hexes != tf.info.get_piece_hash(piece_number as usize) {
+                        println!(" \x1b[91mHash doesn't match!\x1b[0m");
+                        offset = 0;
+                        continue;
+                    } else {
+                        println!(" \x1b[92mCorrect hash!\x1b[0m");
+                    }
+                    //==========
+                    let (mut of, files) = tf.info.get_piece_files(piece_number as usize);
+
+                    let mut prev_written_bytes = 0;
+                    for file in files {
+                        let file_path = format!(
+                            "downloads/{}",
+                            if tf.info.files.len() > 1 {
+                                &tf.info.name
+                            } else {
+                                ""
+                            }
+                        );
+                        let path = std::path::Path::new(&file_path);
+                        let mut fc = file.clone();
+                        fc.path = path.join(file.path.clone());
+                        let mut f = OpenOptions::new().write(true).open(fc.path).unwrap();
+
+                        f.seek(SeekFrom::Start(of as u64)).expect("seek failed");
+
+                        let how_much = std::cmp::min(
+                            file.length - of,
+                            tf.info.piece_length as usize - prev_written_bytes,
+                        );
+                        let written = f.write(&piece[..how_much]);
+                        match written {
+                            Ok(count) => {
+                                prev_written_bytes = count;
+                                piece.drain(..count);
+                                of = 0;
+                            }
+                            Err(e) => {
+                                println!("Write failed\n{:?}", e);
+                            }
+                        }
+                    }
+                    piece.drain(..);
+
+                    offset = 0;
+                }
+                */
+            }
+            8 => println!("cancel"),
+            9 => println!("port"),
+            _ => println!("WHAT?!"),
+        }
+    }
+
+    fn try_parse_client(&self) -> String {
+        let huh = [self.id[1], self.id[2]];
+
+        match &huh {
+            b"7T" => String::from("aTorrent for Android"),
+            b"AB" => String::from("AnyEvent::BitTorrent"),
+            b"AG" => String::from("Ares"),
+            b"A~" => String::from("Ares"),
+            b"AR" => String::from("Arctic"),
+            b"AV" => String::from("Avicora"),
+            b"AT" => String::from("Artemis"),
+            b"AX" => String::from("BitPump"),
+            b"AZ" => String::from("Azureus"),
+            b"BB" => String::from("BitBuddy"),
+            b"BC" => String::from("BitComet"),
+            b"BE" => String::from("Baretorrent"),
+            b"BF" => String::from("Bitflu"),
+            b"BG" => String::from("BTG (uses Rasterbar libtorrent)"),
+            b"BL" => String::from("BitCometLite (uses 6 digit version number) or BitBlinder"),
+            b"BP" => String::from("BitTorrent Pro (Azureus + spyware)"),
+            b"BR" => String::from("BitRocket"),
+            b"BS" => String::from("BTSlave"),
+            b"BT" => String::from("mainline BitTorrent (versions >= 7.9) or BBtor"),
+            b"Bt" => String::from("Bt"),
+            b"BW" => String::from("BitWombat"),
+            b"BX" => String::from("~Bittorrent X"),
+            b"CD" => String::from("Enhanced CTorrent"),
+            b"CT" => String::from("CTorrent"),
+            b"DE" => String::from("DelugeTorrent"),
+            b"DP" => String::from("Propagate Data Client"),
+            b"EB" => String::from("EBit"),
+            b"ES" => String::from("electric sheep"),
+            b"FC" => String::from("FileCroc"),
+            b"FD" => String::from("Free Download Manager (versions >= 5.1.12)"),
+            b"FT" => String::from("FoxTorrent"),
+            b"FX" => String::from("Freebox BitTorrent"),
+            b"GS" => String::from("GSTorrent"),
+            b"HK" => String::from("Hekate"),
+            b"HL" => String::from("Halite"),
+            b"HM" => String::from("hMule (uses Rasterbar libtorrent)"),
+            b"HN" => String::from("Hydranode"),
+            b"IL" => String::from("iLivid"),
+            b"JS" => String::from("Justseed.it client"),
+            b"JT" => String::from("JavaTorrent"),
+            b"KG" => String::from("KGet"),
+            b"KT" => String::from("KTorrent"),
+            b"LC" => String::from("LeechCraft"),
+            b"LH" => String::from("LH-ABC"),
+            b"LP" => String::from("Lphant"),
+            b"LT" => String::from("libtorrent"),
+            b"lt" => String::from("libTorrent"),
+            b"LW" => String::from("LimeWire"),
+            b"MK" => String::from("Meerkat"),
+            b"MO" => String::from("MonoTorrent"),
+            b"MP" => String::from("MooPolice"),
+            b"MR" => String::from("Miro"),
+            b"MT" => String::from("MoonlightTorrent"),
+            b"NB" => String::from("Net::BitTorrent"),
+            b"NX" => String::from("Net Transport"),
+            b"OS" => String::from("OneSwarm"),
+            b"OT" => String::from("OmegaTorrent"),
+            b"PB" => String::from("Protocol::BitTorrent"),
+            b"PD" => String::from("Pando"),
+            b"PI" => String::from("PicoTorrent"),
+            b"PT" => String::from("PHPTracker"),
+            b"qB" => String::from("qBittorrent"),
+            b"QD" => String::from("QQDownload"),
+            b"QT" => String::from("Qt 4 Torrent example"),
+            b"RT" => String::from("Retriever"),
+            b"RZ" => String::from("RezTorrent"),
+            b"S~" => String::from("Shareaza alpha/beta"),
+            b"SB" => String::from("~Swiftbit"),
+            b"SD" => String::from("Thunder (aka XùnLéi)"),
+            b"SM" => String::from("SoMud"),
+            b"SP" => String::from("BitSpirit"),
+            b"SS" => String::from("SwarmScope"),
+            b"ST" => String::from("SymTorrent"),
+            b"st" => String::from("sharktorrent"),
+            b"SZ" => String::from("Shareaza"),
+            b"TB" => String::from("Torch"),
+            b"TE" => String::from("terasaur Seed Bank"),
+            b"TL" => String::from("Tribler (versions >= 6.1.0)"),
+            b"TN" => String::from("TorrentDotNET"),
+            b"TR" => String::from("Transmission"),
+            b"TS" => String::from("Torrentstorm"),
+            b"TT" => String::from("TuoTu"),
+            b"UL" => String::from("uLeecher!"),
+            b"UM" => String::from("µTorrent for Mac"),
+            b"UT" => String::from("µTorrent"),
+            b"VG" => String::from("Vagaa"),
+            b"WD" => String::from("WebTorrent Desktop"),
+            b"WT" => String::from("BitLet"),
+            b"WW" => String::from("WebTorrent"),
+            b"WY" => String::from("FireTorrent"),
+            b"XF" => String::from("Xfplay"),
+            b"XL" => String::from("Xunlei"),
+            b"XS" => String::from("XSwifter"),
+            b"XT" => String::from("XanTorrent"),
+            b"XX" => String::from("Xtorrent"),
+            b"ZT" => String::from("ZipTorrent"),
+            _ => String::from("unknown client"),
+        }
+    }
 }
