@@ -4,7 +4,7 @@ use sha1::{Digest, Sha1};
 use std::fmt;
 use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TorrentFile {
     pub announce: String,
     pub announce_list: Option<Vec<Vec<String>>>,
@@ -299,7 +299,7 @@ impl fmt::Display for Info {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InfoHash {
     hash: [u8; 20],
 }

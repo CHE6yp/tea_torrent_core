@@ -1,11 +1,11 @@
 use bendy::decoding::FromBencode;
 use sha1::{Digest, Sha1};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{stdout, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
-use std::slice::Iter;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -41,69 +41,79 @@ fn main() {
     println!("Connection complete, connecting to peers");
 
     let peers = connect_to_peers(respone, &tf);
-    // let mut peers = peers.iter();
-
     let mut handles: Vec<thread::JoinHandle<_>> = vec![];
-    for peer in peers {
-        let peer = Arc::new(Mutex::new(peer));
+
+    let tf = Arc::new(tf);
+    let (tx, rx) = channel();
+
+    for peer in &peers {
+        let peer = Arc::clone(&peer);
+        let tx = tx.clone();
         let join_handle = thread::spawn(move || loop {
-            peer.lock().unwrap().get_message();
+            // let m = Peer::get_message(&peer.stream);
+            let r = peer.get_message();
+            if !r.is_none() {
+                //TODO wanna send this inside get_message()
+                let _r = tx.send((Arc::clone(&peer), r.unwrap()));
+            }
         });
+
         handles.push(join_handle);
     }
 
-    for handle in handles {
-        handle.join();
-    }
-    // thread_joiner.join();
+    let tf_piece = Arc::clone(&tf);
+    handles.push(thread::spawn(move || {
+        let mut pieces = HashMap::new();
+        rx.iter().for_each(|(peer, piece_buf)| {
+            let pn = big_endian_to_u32(&piece_buf[1..5].try_into().unwrap());
+            if !pieces.contains_key(&pn) {
+                // pieces.insert(pn, Piece{buf: vec![0; tf_piece.info.piece_length.try_into().unwrap()] });
+                pieces.insert(pn, Piece::new(tf_piece.info.piece_length));
+            }
+            pieces.get_mut(&pn).unwrap().add_block(piece_buf);
+            if pieces[&pn].block_count == pieces[&pn].block_count_goal {
+                pieces[&pn].write(pn, peer, &tf_piece);
+                pieces.remove(&pn);
+            }
+        });
+    }));
 
-    // while missing_pieces.len() > 0 {
-    //     // let s= peers.next().unwrap();
-    //     // download_from_peer(&s.unwrap().stream, &tf, missing_pieces.iter())
-    //     peers[0].get_message()
-    // }
-}
+    let mut missing_pieces = missing_pieces.iter();
+    let mut piece = missing_pieces.next();
 
-fn preallocate(tf: &TorrentFile) {
-    println!("Preallocating files");
-    let file_path = format!(
-        "downloads/{}",
-        if tf.info.files.len() > 1 {
-            &tf.info.name
+    while piece != None {
+        let peers = peers.clone();
+        let peers = peers
+            .into_iter()
+            .filter(|p| p.busy.lock().unwrap().0 == false)
+            .collect::<Vec<Arc<Peer>>>();
+        let peer = peers.first();
+
+        if peer.is_none() {
+            continue;
+        }
+
+        let peer = Arc::clone(&peer.unwrap());
+        let p = piece.unwrap();
+        //println!("peer {} stat {:?}, val {:?}", peer.id_string(), peer.status, piece);
+        let piece_length = if *p == missing_pieces.len() - 1 {
+            tf.info.length as u32 - (tf.info.piece_length as u32 * (*p as u32 - 1))
         } else {
-            ""
+            tf.info.piece_length
+        };
+        let res = peer.request(&peer.stream, *p as u32, piece_length);
+        if res {
+            piece = missing_pieces.next();
+            println!("Next piece {:?}", piece);
         }
-    );
-    let path = std::path::Path::new(&file_path);
-    //TODO ok wtf did i do here?
-    let files: Vec<tf::File> = tf
-        .info
-        .files
-        .iter()
-        .map(|f| -> tf::File {
-            let mut fc = f.clone();
-            fc.path = path.join(f.path.clone());
-            fc
-        })
-        .collect();
-
-    for file in files {
-        if let Some(dir_path) = file.path.as_path().parent() {
-            fs::create_dir_all(dir_path).unwrap();
-        }
-
-        //preallocate file
-        let f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(file.path)
-            .unwrap();
-        f.set_len(file.length as u64).unwrap();
     }
-    println!("Preallocation complete");
+
+    for handle in handles {
+        let _r = handle.join();
+    }
 }
 
-fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
+fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>> {
     let mut streams = vec![];
     let pool = ThreadPool::new(9);
     let (tx, rx) = channel();
@@ -126,7 +136,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
 
         pool.execute(move || {
             stdout().flush().unwrap();
-            let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(2));
+            let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(10));
 
             if let Ok(mut s) = stream {
                 //s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
@@ -153,12 +163,15 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
                 }
                 let mut peer_id = [0; 20];
                 peer_id.clone_from_slice(&handshake_buff[48..68]);
+                // s.set_nonblocking(true);
                 tx.send((
                     Result::Done(Peer {
                         id: peer_id,
                         stream: s,
-                        bitfield: vec![],
-                        status: (true, false, true, false),
+                        bitfield: Mutex::new(vec![]),
+                        piece: Mutex::new(vec![]),
+                        status: Mutex::new((true, false, true, false)),
+                        busy: Mutex::new((false, false)),
                     }),
                     respone.peers[i],
                 ))
@@ -175,7 +188,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
         match res {
             Result::Done(s) => {
                 println!("\x1b[1mDone!\x1b[0m {}", s.try_parse_client());
-                streams.push(s);
+                streams.push(Arc::new(s));
             }
             Result::Timeout => {
                 println!("\x1b[91mFailed!\x1b[0m");
@@ -197,237 +210,6 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Peer> {
     streams
 }
 
-#[allow(dead_code)]
-fn download_from_peer(mut s: &TcpStream, tf: &TorrentFile, mut missing_pieces: Iter<usize>) {
-    //reading actuall data
-    s.set_read_timeout(Some(Duration::from_secs(15))).unwrap(); //safe unwrap
-
-    //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
-    let mut peer_status = (true, false, true, false);
-    let mut pn = missing_pieces.next().unwrap();
-    let mut pl: u32 = tf.info.piece_length as u32;
-    let piece_count = tf.info.length / tf.info.piece_length as usize;
-    //16Kb more than that doesn't work somehow, BEP 52 or something,
-    let mut block_size: u32 = BLOCK_SIZE;
-    let mut piece: Vec<u8> = vec![];
-    let mut offset: u32 = 0;
-
-    loop {
-        let mut message_size = [0u8; 4];
-        let package_size = s.read(&mut message_size);
-        match package_size {
-            Ok(_package_size) => {} //println!("package_size {}", package_size),
-            Err(e) => {
-                println!("No package for 5 secs; {}", e);
-                if peer_status.2 == true {
-                    println!("Sending unchoke and interested");
-                    //send unchoke and interested
-                    let r = s.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
-                    match r {
-                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => println!("Error writing buffer: {:?}", e),
-                        _ => {}
-                    }
-                    peer_status.0 = false;
-                    peer_status.1 = true;
-                } else {
-                    println!("Send keep-alive");
-                    let r = s.write(&[0, 0, 0, 0]);
-                    match r {
-                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) if e.kind() == ErrorKind::ConnectionAborted => {
-                            println!("\x1b[91mConnection aborted\x1b[0m");
-                        }
-                        Err(e) => println!("Error writing buffer: {:?}", e),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let message_size = big_endian_to_u32(&message_size);
-        if message_size == 0 {
-            println!("keep alive");
-            continue;
-        }
-
-        let mut message_buf = vec![0u8; message_size as usize];
-        s.read_exact(&mut message_buf)
-            .expect("Couldn't read buffer");
-        /*
-            keep-alive: <len=0000>
-            choke: <len=0001><id=0>
-            unchoke: <len=0001><id=1>
-            interested: <len=0001><id=2>
-            not interested: <len=0001><id=3>
-            have: <len=0005><id=4><piece index>
-            bitfield: <len=0001+X><id=5><bitfield>
-            request: <len=0013><id=6><index><begin><length>
-            piece: <len=0009+X><id=7><index><begin><block>
-            cancel: <len=0013><id=8><index><begin><length>
-            port: <len=0003><id=9><listen-port>
-        */
-        match &message_buf[0] {
-            0 => {
-                println!("choke");
-                peer_status.2 = true;
-                println!("Sending unchoke and interested");
-                //send unchoke and interested
-                let r = s.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
-                match r {
-                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => println!("Error writing buffer: {:?}", e),
-                    _ => {}
-                }
-                peer_status.0 = false;
-                peer_status.1 = true;
-            }
-            1 => {
-                println!("unchoke");
-                peer_status.2 = false;
-                println!("\x1b[1mRequesting piece {}\x1b[0m", pn);
-            }
-            2 => println!("interested"),
-            3 => println!("not interested"),
-            4 => println!("have\n {:?}", &message_buf[1..]),
-            5 => println!("bitfield\n {:?}", &message_buf[1..]),
-            6 => println!("request"),
-            7 => {
-                print!(
-                    "\x1b[1M\rGot piece {} of {} ({}%), offset {}/{} ({}%)",
-                    big_endian_to_u32(&message_buf[1..5].try_into().unwrap()),
-                    piece_count,
-                    (big_endian_to_u32(&message_buf[1..5].try_into().unwrap()) as f32
-                        / ((tf.info.length as f32 / tf.info.piece_length as f32) / 100.0))
-                        as u32,
-                    big_endian_to_u32(&message_buf[5..9].try_into().unwrap()),
-                    pl,
-                    ((big_endian_to_u32(&message_buf[5..9].try_into().unwrap()) + block_size)
-                        as f32
-                        / (pl as f32 / 100.0)) as u32
-                );
-                stdout().flush().unwrap();
-                piece.append(&mut message_buf[9..].to_vec());
-
-                //if whole piece is downloaded
-                if piece.len() == pl.try_into().unwrap() {
-                    //check hash
-                    let mut hasher = Sha1::new();
-                    hasher.update(&piece);
-                    let hexes = hasher.finalize();
-                    let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
-                    if hexes != tf.info.get_piece_hash(*pn) {
-                        println!(" \x1b[91mHash doesn't match!\x1b[0m");
-                        offset = 0;
-                        continue;
-                    } else {
-                        println!(" \x1b[92mCorrect hash!\x1b[0m");
-                    }
-                    //==========
-                    let (mut of, files) = tf.info.get_piece_files(*pn);
-
-                    let mut prev_written_bytes = 0;
-                    for file in files {
-                        let file_path = format!(
-                            "downloads/{}",
-                            if tf.info.files.len() > 1 {
-                                &tf.info.name
-                            } else {
-                                ""
-                            }
-                        );
-                        let path = std::path::Path::new(&file_path);
-                        let mut fc = file.clone();
-                        fc.path = path.join(file.path.clone());
-                        let mut f = OpenOptions::new().write(true).open(fc.path).unwrap();
-
-                        f.seek(SeekFrom::Start(of as u64)).expect("seek failed");
-
-                        let how_much = std::cmp::min(
-                            file.length - of,
-                            tf.info.piece_length as usize - prev_written_bytes,
-                        );
-                        let written = f.write(&piece[..how_much]);
-                        match written {
-                            Ok(count) => {
-                                prev_written_bytes = count;
-                                piece.drain(..count);
-                                of = 0;
-                            }
-                            Err(e) => {
-                                println!("Write failed\n{:?}", e);
-                            }
-                        }
-                        //println!("Piece {:?}", &piece);
-                    }
-                    //=======
-                    /*
-                    println!(
-                        "SEEEEEK OFFSET {:?}",
-                        *pn as u64 * (tf.info.piece_length as u64)
-                    );
-                    file.seek(SeekFrom::Start(*pn as u64 * (tf.info.piece_length as u64)))
-                        .expect("seek failed");
-                    file.write_all(&piece).expect("write failed");
-                    */
-                    piece.drain(..);
-
-                    pn = missing_pieces.next().unwrap();
-                    offset = 0;
-                    println!("\x1b[1mRequesting piece {}\x1b[0m", pn);
-
-                    if pn > &piece_count {
-                        break;
-                    }
-                }
-                //println!("");
-            }
-            8 => println!("cancel"),
-            9 => println!("port"),
-            _ => println!("WHAT?!"),
-        }
-
-        //request pieces if we are unchoked
-        if peer_status.2 == false && offset < pl && pn <= &piece_count {
-            let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
-            request_message.append(&mut (*pn as u32).to_be_bytes().to_vec());
-            let be_offset = offset.to_be_bytes();
-            request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
-
-            if *pn == piece_count {
-                if offset == 0 {
-                    pl = (tf.info.length - ((piece_count) * pl as usize)) as u32;
-                }
-                let left = pl - offset;
-                block_size = if left < BLOCK_SIZE {
-                    //bitwise magic! this finds the rightmost bit it last_piece_size
-                    // pl & (!(pl - 1))
-                    //and this finds the rightmost bit it last_piece_size
-                    1 << (31 - left.leading_zeros())
-                } else {
-                    BLOCK_SIZE
-                };
-            }
-            //piece length
-            request_message.append(&mut block_size.to_be_bytes().to_vec());
-            /*println!(
-                "\x1b[1mRequesting piece {}\x1b[0m, offset {}, block size {} bytes",
-                pn, offset, block_size
-            );*/
-            match s.write(&request_message) {
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    println!("\x1b[91mError writing buffer: {}\x1b[0m", e.to_string());
-                    continue;
-                }
-                _ => {}
-            }
-            offset += block_size;
-        }
-    }
-}
-
-//todo check this fn it can be better, this is way too slow (268435456)
 fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
     println!("Checking files hash");
     let piece_count = tf.info.length / tf.info.piece_length as usize;
@@ -508,27 +290,33 @@ fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
 struct Peer {
     id: [u8; 20],
     stream: TcpStream,
-    bitfield: Vec<u8>,
+    bitfield: Mutex<Vec<u8>>,
     //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
-    status: (bool, bool, bool, bool),
+    status: Mutex<(bool, bool, bool, bool)>,
+    busy: Mutex<(bool, bool)>,
+    piece: Mutex<Vec<u8>>,
 }
 
 impl Peer {
-    fn get_message(&mut self) {
-        print!("{} ", String::from_utf8_lossy(&self.id));
+    fn get_message(&self) -> Option<Vec<u8>> {
+        //self.stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
         let mut message_size = [0u8; 4];
-        let package_size = self.stream.read(&mut message_size);
+        let mut stream = &self.stream;
+        let package_size = stream.read(&mut message_size);
         match package_size {
             Ok(_package_size) => {} //println!("package_size {}", package_size),
             Err(e) => {
                 println!("No package for some secs; read timeout; {}", e);
 
                 println!("Send keep-alive");
-                let r = self.stream.write(&[0, 0, 0, 0]);
+                let r = stream.write(&[0, 0, 0, 0]);
                 match r {
-                    Err(e) if e.kind() == ErrorKind::Interrupted => return,
+                    Err(e) if e.kind() == ErrorKind::Interrupted => return None,
+                    Err(e) if e.kind() == ErrorKind::ConnectionReset => return None,
                     Err(e) if e.kind() == ErrorKind::ConnectionAborted => {
                         println!("\x1b[91mConnection aborted\x1b[0m");
+                        // return Message::Aborted;
+                        return None;
                     }
                     Err(e) => println!("Error writing buffer: {:?}", e),
                     _ => {}
@@ -539,11 +327,11 @@ impl Peer {
         let message_size = big_endian_to_u32(&message_size);
         if message_size == 0 {
             println!("Got keep alive");
-            return;
+            return None;
         }
 
         let mut message_buf = vec![0u8; message_size as usize];
-        self.stream
+        stream
             .read_exact(&mut message_buf)
             .expect("Couldn't read buffer");
         /*
@@ -561,92 +349,102 @@ impl Peer {
         */
         match &message_buf[0] {
             0 => {
-                println!("choke");
-                self.status.2 = true;
+                println!("Choked by {}", self.id_string());
+                self.status.lock().unwrap().2 = true;
             }
             1 => {
-                println!("unchoke");
-                self.status.2 = false;
+                println!("Unchoked by {}", self.id_string());
+                self.status.lock().unwrap().2 = false;
             }
-            2 => println!("interested"),
-            3 => println!("not interested"),
-            4 => println!("have\n {:?}", &message_buf[1..]),
+            2 => {
+                println!("interested");
+            }
+            3 => {
+                println!("not interested");
+            }
+            4 => {
+                println!("have {:?}", &message_buf[1..]);
+            }
             5 => {
-                self.bitfield = (&message_buf[1..]).to_vec();
+                //self.bitfield = (&message_buf[1..]).to_vec();
                 println!("bitfield\n {:?}", &message_buf[1..]);
             }
-            6 => println!("request"),
-            7 => {
-                let piece_number = big_endian_to_u32(&message_buf[1..5].try_into().unwrap());
-                let offset = big_endian_to_u32(&message_buf[5..9].try_into().unwrap());
-                print!(
-                    "\x1b[1M\rGot piece {} of PIECE COUNT (PERC%), offset {}/PL (PERC%)",
-                    piece_number, offset,
-                );
-                /*
-                stdout().flush().unwrap();
-                piece.append(&mut message_buf[9..].to_vec());
-
-                //if whole piece is downloaded
-                if piece.len() == pl.try_into().unwrap() {
-                    //check hash
-                    let mut hasher = Sha1::new();
-                    hasher.update(&piece);
-                    let hexes = hasher.finalize();
-                    let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
-                    if hexes != tf.info.get_piece_hash(piece_number as usize) {
-                        println!(" \x1b[91mHash doesn't match!\x1b[0m");
-                        offset = 0;
-                        continue;
-                    } else {
-                        println!(" \x1b[92mCorrect hash!\x1b[0m");
-                    }
-                    //==========
-                    let (mut of, files) = tf.info.get_piece_files(piece_number as usize);
-
-                    let mut prev_written_bytes = 0;
-                    for file in files {
-                        let file_path = format!(
-                            "downloads/{}",
-                            if tf.info.files.len() > 1 {
-                                &tf.info.name
-                            } else {
-                                ""
-                            }
-                        );
-                        let path = std::path::Path::new(&file_path);
-                        let mut fc = file.clone();
-                        fc.path = path.join(file.path.clone());
-                        let mut f = OpenOptions::new().write(true).open(fc.path).unwrap();
-
-                        f.seek(SeekFrom::Start(of as u64)).expect("seek failed");
-
-                        let how_much = std::cmp::min(
-                            file.length - of,
-                            tf.info.piece_length as usize - prev_written_bytes,
-                        );
-                        let written = f.write(&piece[..how_much]);
-                        match written {
-                            Ok(count) => {
-                                prev_written_bytes = count;
-                                piece.drain(..count);
-                                of = 0;
-                            }
-                            Err(e) => {
-                                println!("Write failed\n{:?}", e);
-                            }
-                        }
-                    }
-                    piece.drain(..);
-
-                    offset = 0;
-                }
-                */
+            6 => {
+                println!("request");
             }
-            8 => println!("cancel"),
-            9 => println!("port"),
-            _ => println!("WHAT?!"),
+            7 => {
+                //println!("Piece");
+                return Some(message_buf);
+                //tx.send((&self, message_buf));
+            }
+            8 => {
+                println!("cancel");
+            }
+            9 => {
+                println!("port");
+            }
+            _ => {
+                println!("WHAT?!");
+            }
         }
+        None
+    }
+
+    fn request(&self, mut stream: &TcpStream, piece_number: u32, piece_length: u32) -> bool {
+        // if self.status.lock().unwrap().1 && self.status.lock().unwrap().2 {
+        if self.status.lock().unwrap().2 {
+            // println!("Sending unchoke and interested");
+            //send unchoke and interested
+            let r = stream.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
+            match r {
+                Err(e) if e.kind() == ErrorKind::Interrupted => return false,
+                Err(e) => println!("Error writing buffer: {:?}", e),
+                _ => {}
+            }
+            self.status.lock().unwrap().0 = false;
+            self.status.lock().unwrap().1 = true;
+            return false;
+        }
+
+        if self.status.lock().unwrap().2 {
+            println!("Sstill choked");
+            return false;
+        }
+
+        println!("request {:?} from", piece_number);
+        let mut offset: u32 = 0;
+        let mut left = piece_length;
+        self.busy.lock().unwrap().0 = true;
+
+        while left > 0 {
+            let block_size = if left < BLOCK_SIZE {
+                //bitwise magic! this finds the rightmost bit it last_piece_size
+                // piece_length & (!(piece_length - 1))
+                //and this finds the rightmost bit it last_piece_size
+                1 << (31 - left.leading_zeros())
+            } else {
+                BLOCK_SIZE
+            };
+
+            let mut request_message = vec![0, 0, 0, 13, 6]; //constant part
+            request_message.append(&mut piece_number.to_be_bytes().to_vec());
+            let be_offset = offset.to_be_bytes();
+            request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
+            request_message.append(&mut block_size.to_be_bytes().to_vec());
+
+            match stream.write(&request_message) {
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    println!("\x1b[91mError writing buffer: {}\x1b[0m", e.to_string());
+                    continue;
+                }
+                _ => {}
+            }
+
+            left -= block_size;
+            offset += block_size;
+        }
+        true
     }
 
     fn try_parse_client(&self) -> String {
@@ -751,5 +549,160 @@ impl Peer {
             b"ZT" => String::from("ZipTorrent"),
             _ => String::from("unknown client"),
         }
+    }
+
+    fn id_string(&self) -> String {
+        String::from_utf8_lossy(&self.id).to_string()
+    }
+}
+
+fn preallocate(tf: &TorrentFile) {
+    println!("Preallocating files");
+    let file_path = format!(
+        "downloads/{}",
+        if tf.info.files.len() > 1 {
+            &tf.info.name
+        } else {
+            ""
+        }
+    );
+    let path = std::path::Path::new(&file_path);
+    //TODO ok wtf did i do here?
+    let files: Vec<tf::File> = tf
+        .info
+        .files
+        .iter()
+        .map(|f| -> tf::File {
+            let mut fc = f.clone();
+            fc.path = path.join(f.path.clone());
+            fc
+        })
+        .collect();
+
+    for file in files {
+        if let Some(dir_path) = file.path.as_path().parent() {
+            fs::create_dir_all(dir_path).unwrap();
+        }
+
+        //preallocate file
+        let f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(file.path)
+            .unwrap();
+        f.set_len(file.length as u64).unwrap();
+    }
+    println!("Preallocation complete");
+}
+
+#[derive(Debug)]
+struct Piece {
+    buf: Vec<u8>,
+    block_count: u32,
+    block_count_goal: u32,
+}
+
+impl Piece {
+    fn new(size: u32) -> Piece {
+        let block_count_goal = size / BLOCK_SIZE;
+        Piece {
+            buf: vec![0; size.try_into().unwrap()],
+            block_count_goal: block_count_goal,
+            block_count: 0,
+        }
+    }
+
+    fn add_block(&mut self, block: Vec<u8>) {
+        self.block_count += 1;
+        // let piece_number = big_endian_to_u32(&block[1..5].try_into().unwrap());
+        let offset = big_endian_to_u32(&block[5..9].try_into().unwrap());
+
+        // let piece_count = tf.info.length / tf.info.piece_length as usize;
+        // println!(
+        //     "Got piece {} of {} ({}%), offset {}/{} ({}%)  from {}",
+        //     big_endian_to_u32(&block[1..5].try_into().unwrap()),
+        //     piece_count,
+        //     (big_endian_to_u32(&block[1..5].try_into().unwrap()) as f32
+        //         / ((tf.info.length as f32 / tf.info.piece_length as f32) / 100.0))
+        //         as u32,
+        //     big_endian_to_u32(&block[5..9].try_into().unwrap()),
+        //     tf.info.piece_length,
+        //     ((big_endian_to_u32(&block[5..9].try_into().unwrap()) + BLOCK_SIZE) as f32
+        //         / (tf.info.piece_length as f32 / 100.0)) as u32,
+        //     peer.id_string(),
+        // );
+
+        // self.buf.append(&mut block[9..].to_vec());
+        let new_buf = [
+            &self.buf[..offset as usize],
+            &block[9..],
+            &self.buf[(offset + BLOCK_SIZE) as usize..],
+        ]
+        .concat();
+        self.buf = new_buf;
+    }
+
+    fn write(&self, piece_number: u32, peer: Arc<Peer>, tf: &TorrentFile) -> bool {
+        //if whole piece is downloaded
+        let mut buffer = self.buf.clone();
+        //check hash
+        let mut hasher = Sha1::new();
+        hasher.update(&buffer);
+        let hexes = hasher.finalize();
+        let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
+        if hexes != tf.info.get_piece_hash(piece_number as usize) {
+            println!(
+                " \x1b[91mHash doesn't match!\x1b[0m Piece {} from{}",
+                piece_number,
+                peer.id_string(),
+            );
+            peer.busy.lock().unwrap().0 = false;
+            return false;
+        }
+
+        println!(
+            " \x1b[92mCorrect hash!\x1b[0m Piece {} from {}",
+            piece_number,
+            peer.id_string(),
+        );
+        //==========
+        let (mut of, files) = tf.info.get_piece_files(piece_number as usize);
+
+        let mut prev_written_bytes = 0;
+        for file in files {
+            let file_path = format!(
+                "downloads/{}",
+                if tf.info.files.len() > 1 {
+                    &tf.info.name
+                } else {
+                    ""
+                }
+            );
+            let path = std::path::Path::new(&file_path);
+            let mut fc = file.clone();
+            fc.path = path.join(file.path.clone());
+            let mut f = OpenOptions::new().write(true).open(fc.path).unwrap();
+
+            f.seek(SeekFrom::Start(of as u64)).expect("seek failed");
+
+            let how_much = std::cmp::min(
+                file.length - of,
+                tf.info.piece_length as usize - prev_written_bytes,
+            );
+            let written = f.write(&buffer[..how_much]);
+            match written {
+                Ok(count) => {
+                    prev_written_bytes = count;
+                    buffer.drain(..count);
+                    of = 0;
+                }
+                Err(e) => {
+                    println!("Write failed\n{:?}", e);
+                }
+            }
+        }
+
+        peer.busy.lock().unwrap().0 = false;
+        true
     }
 }
