@@ -82,10 +82,12 @@ fn main() {
     let mut piece = missing_pieces.next();
 
     while piece != None {
+        let p = piece.unwrap();
+
         let peers = peers.clone();
         let peers = peers
             .into_iter()
-            .filter(|p| p.busy.lock().unwrap().0 == false)
+            .filter(|peer| peer.has_piece(*p) && *peer.busy.lock().unwrap() == false)
             .collect::<Vec<Arc<Peer>>>();
         let peer = peers.first();
 
@@ -94,8 +96,7 @@ fn main() {
         }
 
         let peer = Arc::clone(&peer.unwrap());
-        let p = piece.unwrap();
-        //println!("peer {} stat {:?}, val {:?}", peer.id_string(), peer.status, piece);
+
         let piece_length = if *p == missing_pieces.len() - 1 {
             tf.info.length as u32 - (tf.info.piece_length as u32 * (*p as u32 - 1))
         } else {
@@ -104,7 +105,7 @@ fn main() {
         let res = peer.request(&peer.stream, *p as u32, piece_length);
         if res {
             piece = missing_pieces.next();
-            println!("Next piece {:?}", piece);
+            // println!("Next piece {:?}", piece);
         }
     }
 
@@ -133,6 +134,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
     for i in 0..respone.peers.len() {
         let respone = Arc::clone(&respone);
         let tx = tx.clone();
+        let piece_count = tf.info.piece_count;
 
         pool.execute(move || {
             stdout().flush().unwrap();
@@ -168,10 +170,9 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
                     Result::Done(Peer {
                         id: peer_id,
                         stream: s,
-                        bitfield: Mutex::new(vec![]),
-                        piece: Mutex::new(vec![]),
+                        bitfield: Mutex::new(vec![0; piece_count as usize]),
                         status: Mutex::new((true, false, true, false)),
-                        busy: Mutex::new((false, false)),
+                        busy: Mutex::new(false),
                     }),
                     respone.peers[i],
                 ))
@@ -212,16 +213,15 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
 
 fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
     println!("Checking files hash");
-    let piece_count = tf.info.length / tf.info.piece_length as usize;
     let mut missing_pieces = vec![];
 
     let pool = ThreadPool::new(9);
 
     let (tx, rx) = channel();
 
-    for p in 0..piece_count + 1 {
+    for p in 0..tf.info.piece_count {
         let mut read_buf = Vec::with_capacity(tf.info.piece_length as usize);
-        let (offset, files) = tf.info.get_piece_files(p);
+        let (offset, files) = tf.info.get_piece_files(p as usize);
 
         let mut first = true;
         let mut r = 0;
@@ -264,16 +264,18 @@ fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
         });
     }
 
-    rx.iter().take(piece_count + 1).for_each(|(p, hexes)| {
-        if hexes != tf.info.get_piece_hash(p) {
-            print!("\x1b[91m");
-            missing_pieces.push(p);
-        } else {
-            print!("\x1b[92m");
-        }
-        print!("{} ", p);
-        stdout().flush().unwrap();
-    });
+    rx.iter()
+        .take(tf.info.piece_count as usize)
+        .for_each(|(p, hexes)| {
+            if hexes != tf.info.get_piece_hash(p as usize) {
+                print!("\x1b[91m");
+                missing_pieces.push(p as usize);
+            } else {
+                print!("\x1b[92m");
+            }
+            print!("{} ", p);
+            stdout().flush().unwrap();
+        });
 
     println!("\x1b[0m");
     missing_pieces
@@ -293,8 +295,7 @@ struct Peer {
     bitfield: Mutex<Vec<u8>>,
     //am_choking = 1, am_interested = 0, peer_choking = 1, peer_interested = 0
     status: Mutex<(bool, bool, bool, bool)>,
-    busy: Mutex<(bool, bool)>,
-    piece: Mutex<Vec<u8>>,
+    busy: Mutex<bool>,
 }
 
 impl Peer {
@@ -311,12 +312,18 @@ impl Peer {
                 println!("Send keep-alive");
                 let r = stream.write(&[0, 0, 0, 0]);
                 match r {
-                    Err(e) if e.kind() == ErrorKind::Interrupted => return None,
-                    Err(e) if e.kind() == ErrorKind::ConnectionReset => return None,
-                    Err(e) if e.kind() == ErrorKind::ConnectionAborted => {
-                        println!("\x1b[91mConnection aborted\x1b[0m");
-                        // return Message::Aborted;
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {
+                        println!("\x1b[91mInterrupted\x1b[0m {}", self.id_string());
                         return None;
+                    }
+                    Err(e) if e.kind() == ErrorKind::ConnectionReset => {
+                        println!("\x1b[91mConnection Reset\x1b[0m {}", self.id_string());
+                        panic!("{:?}", e.kind());
+                    }
+                    Err(e) if e.kind() == ErrorKind::ConnectionAborted => {
+                        println!("\x1b[91mConnection aborted\x1b[0m {}", self.id_string());
+                        // return Message::Aborted;
+                        panic!("{:?}", e.kind());
                     }
                     Err(e) => println!("Error writing buffer: {:?}", e),
                     _ => {}
@@ -326,7 +333,7 @@ impl Peer {
 
         let message_size = big_endian_to_u32(&message_size);
         if message_size == 0 {
-            println!("Got keep alive");
+            // println!("Got keep alive");
             return None;
         }
 
@@ -355,6 +362,7 @@ impl Peer {
             1 => {
                 println!("Unchoked by {}", self.id_string());
                 self.status.lock().unwrap().2 = false;
+                *self.busy.lock().unwrap() = false;
             }
             2 => {
                 println!("interested");
@@ -363,11 +371,14 @@ impl Peer {
                 println!("not interested");
             }
             4 => {
-                println!("have {:?}", &message_buf[1..]);
+                println!("have {:?} {}", &message_buf[1..], self.id_string());
+                self.add_piece_to_bitfield(big_endian_to_u32(
+                    &message_buf[1..].try_into().unwrap(),
+                ));
             }
             5 => {
-                //self.bitfield = (&message_buf[1..]).to_vec();
-                println!("bitfield\n {:?}", &message_buf[1..]);
+                *self.bitfield.lock().unwrap() = (&message_buf[1..]).to_vec();
+                println!("{} bitfield\n {:?}", self.id_string(), &message_buf[1..]);
             }
             6 => {
                 println!("request");
@@ -384,7 +395,7 @@ impl Peer {
                 println!("port");
             }
             _ => {
-                println!("WHAT?!");
+                panic!("Unknown message!");
             }
         }
         None
@@ -392,18 +403,23 @@ impl Peer {
 
     fn request(&self, mut stream: &TcpStream, piece_number: u32, piece_length: u32) -> bool {
         // if self.status.lock().unwrap().1 && self.status.lock().unwrap().2 {
-        if self.status.lock().unwrap().2 {
-            // println!("Sending unchoke and interested");
-            //send unchoke and interested
-            let r = stream.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
-            match r {
-                Err(e) if e.kind() == ErrorKind::Interrupted => return false,
-                Err(e) => println!("Error writing buffer: {:?}", e),
-                _ => {}
+        // println!("peer {} stat {:?}, val {:?}", self.id_string(), self.status, piece_number);
+        if let Ok(mut st) = self.status.lock() {
+            if !st.1 && st.2 {
+                // if !(self.status.lock().unwrap().1) && self.status.lock().unwrap().2 {
+                println!("Sending unchoke and interested");
+                //send unchoke and interested
+                let r = stream.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
+                match r {
+                    Err(e) if e.kind() == ErrorKind::Interrupted => return false,
+                    Err(e) => println!("Error writing buffer: {:?}", e),
+                    _ => {}
+                }
+                st.0 = false;
+                st.1 = true;
+                *self.busy.lock().unwrap() = true;
+                return false;
             }
-            self.status.lock().unwrap().0 = false;
-            self.status.lock().unwrap().1 = true;
-            return false;
         }
 
         if self.status.lock().unwrap().2 {
@@ -411,10 +427,10 @@ impl Peer {
             return false;
         }
 
-        println!("request {:?} from", piece_number);
+        println!("Request {} from {}", piece_number, self.id_string());
         let mut offset: u32 = 0;
         let mut left = piece_length;
-        self.busy.lock().unwrap().0 = true;
+        *self.busy.lock().unwrap() = true;
 
         while left > 0 {
             let block_size = if left < BLOCK_SIZE {
@@ -431,6 +447,7 @@ impl Peer {
             let be_offset = offset.to_be_bytes();
             request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
             request_message.append(&mut block_size.to_be_bytes().to_vec());
+            // println!("request_message {:?}", request_message);
 
             match stream.write(&request_message) {
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
@@ -547,12 +564,46 @@ impl Peer {
             b"XT" => String::from("XanTorrent"),
             b"XX" => String::from("Xtorrent"),
             b"ZT" => String::from("ZipTorrent"),
+            b"ZO" => String::from("ZONA ?"),
             _ => String::from("unknown client"),
         }
     }
 
     fn id_string(&self) -> String {
         String::from_utf8_lossy(&self.id).to_string()
+    }
+
+    fn has_piece(&self, piece_number: usize) -> bool {
+        let byte = piece_number / 8;
+        let bit = (piece_number % 8) as u8;
+        let field = (*self.bitfield.lock().unwrap())[byte as usize];
+        match bit {
+            0 => field & 0b10000000 == 0b10000000,
+            1 => field & 0b01000000 == 0b01000000,
+            2 => field & 0b00100000 == 0b00100000,
+            3 => field & 0b00010000 == 0b00010000,
+            4 => field & 0b00001000 == 0b00001000,
+            5 => field & 0b00000100 == 0b00000100,
+            6 => field & 0b00000010 == 0b00000010,
+            7 => field & 0b00000001 == 0b00000001,
+            _ => unreachable!(),
+        }
+    }
+
+    fn add_piece_to_bitfield(&self, piece_number: u32) {
+        let byte = piece_number / 8;
+        let bit = (piece_number % 8) as u8;
+        self.bitfield.lock().unwrap()[byte as usize] |= match bit {
+            0 => 0b10000000,
+            1 => 0b01000000,
+            2 => 0b00100000,
+            3 => 0b00010000,
+            4 => 0b00001000,
+            5 => 0b00000100,
+            6 => 0b00000010,
+            7 => 0b00000001,
+            _ => unreachable!(),
+        };
     }
 }
 
@@ -617,19 +668,10 @@ impl Piece {
         // let piece_number = big_endian_to_u32(&block[1..5].try_into().unwrap());
         let offset = big_endian_to_u32(&block[5..9].try_into().unwrap());
 
-        // let piece_count = tf.info.length / tf.info.piece_length as usize;
         // println!(
-        //     "Got piece {} of {} ({}%), offset {}/{} ({}%)  from {}",
+        //     "Got piece {} of {{}} ({{}}%), offset {}/{{}} ({{}}%)  from {{}}",
         //     big_endian_to_u32(&block[1..5].try_into().unwrap()),
-        //     piece_count,
-        //     (big_endian_to_u32(&block[1..5].try_into().unwrap()) as f32
-        //         / ((tf.info.length as f32 / tf.info.piece_length as f32) / 100.0))
-        //         as u32,
         //     big_endian_to_u32(&block[5..9].try_into().unwrap()),
-        //     tf.info.piece_length,
-        //     ((big_endian_to_u32(&block[5..9].try_into().unwrap()) + BLOCK_SIZE) as f32
-        //         / (tf.info.piece_length as f32 / 100.0)) as u32,
-        //     peer.id_string(),
         // );
 
         // self.buf.append(&mut block[9..].to_vec());
@@ -656,7 +698,7 @@ impl Piece {
                 piece_number,
                 peer.id_string(),
             );
-            peer.busy.lock().unwrap().0 = false;
+            *peer.busy.lock().unwrap() = false;
             return false;
         }
 
@@ -702,7 +744,7 @@ impl Piece {
             }
         }
 
-        peer.busy.lock().unwrap().0 = false;
+        *peer.busy.lock().unwrap() = false;
         true
     }
 }

@@ -115,6 +115,7 @@ pub struct Info {
     pub length: usize,
     pub name: String,
     pub piece_length: u32,
+    pub piece_count: u32,
     pieces: Vec<u8>,
     pub files: Vec<File>,
     //profiles: Vec<Profile>, //?
@@ -254,6 +255,13 @@ impl FromBencode for Info {
         }
         //let profiles = profiles.ok_or_else(|| DecodeError::missing_field("profiles"))?;
 
+        let piece_count = (length / piece_length as usize
+            + if length % piece_length as usize == 0 {
+                0
+            } else {
+                1
+            }) as u32;
+
         Ok(Info {
             //file_duration,
             //file_media,
@@ -261,7 +269,9 @@ impl FromBencode for Info {
             name,
             piece_length,
             pieces,
-            files, //profiles,
+            files,
+            //profiles,
+            piece_count,
         })
     }
 }
