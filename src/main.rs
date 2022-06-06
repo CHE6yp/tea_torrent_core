@@ -49,14 +49,14 @@ fn main() {
     for peer in &peers {
         let peer = Arc::clone(&peer);
         let tx = tx.clone();
-        let join_handle = thread::spawn(move || loop {
+        let join_handle = thread::Builder::new().name(peer.id_string()).spawn(move || loop {
             // let m = Peer::get_message(&peer.stream);
             let r = peer.get_message();
             if !r.is_none() {
                 //TODO wanna send this inside get_message()
                 let _r = tx.send((Arc::clone(&peer), r.unwrap()));
             }
-        });
+        }).unwrap();
 
         handles.push(join_handle);
     }
@@ -371,14 +371,14 @@ impl Peer {
                 println!("not interested");
             }
             4 => {
-                println!("have {:?} {}", &message_buf[1..], self.id_string());
+                // println!("have {:?} {}", &message_buf[1..], self.id_string());
                 self.add_piece_to_bitfield(big_endian_to_u32(
                     &message_buf[1..].try_into().unwrap(),
                 ));
             }
             5 => {
+                // println!("{} bitfield\n {:?}", self.id_string(), &message_buf[1..]);
                 *self.bitfield.lock().unwrap() = (&message_buf[1..]).to_vec();
-                println!("{} bitfield\n {:?}", self.id_string(), &message_buf[1..]);
             }
             6 => {
                 println!("request");
@@ -570,7 +570,21 @@ impl Peer {
     }
 
     fn id_string(&self) -> String {
-        String::from_utf8_lossy(&self.id).to_string()
+        format!("{}:{}.{}.{}.{}.{}.{}.{}.{}.{}.{}.{}.{}", 
+            String::from_utf8_lossy(&self.id[..8]),
+            &self.id[8],
+            &self.id[9],
+            &self.id[10],
+            &self.id[11],
+            &self.id[12],
+            &self.id[13],
+            &self.id[14],
+            &self.id[15],
+            &self.id[16],
+            &self.id[17],
+            &self.id[18],
+            &self.id[19],
+         )
     }
 
     fn has_piece(&self, piece_number: usize) -> bool {
