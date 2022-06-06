@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{stdout, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{stdout, ErrorKind, Read, Result, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
@@ -40,7 +40,7 @@ fn main() {
     let respone = r.unwrap();
     println!("Connection complete, connecting to peers");
 
-    let peers = connect_to_peers(respone, &tf);
+    let mut peers = connect_to_peers(respone, &tf);
     let mut handles: Vec<thread::JoinHandle<_>> = vec![];
 
     let tf = Arc::new(tf);
@@ -49,14 +49,16 @@ fn main() {
     for peer in &peers {
         let peer = Arc::clone(&peer);
         let tx = tx.clone();
-        let join_handle = thread::Builder::new().name(peer.id_string()).spawn(move || loop {
-            // let m = Peer::get_message(&peer.stream);
-            let r = peer.get_message();
-            if !r.is_none() {
-                //TODO wanna send this inside get_message()
-                let _r = tx.send((Arc::clone(&peer), r.unwrap()));
-            }
-        }).unwrap();
+        let join_handle = thread::Builder::new()
+            .name(peer.id_string())
+            .spawn(move || loop {
+                let r = peer.get_message();
+                if !r.is_none() {
+                    //TODO wanna send this inside get_message()
+                    let _r = tx.send((Arc::clone(&peer), r.unwrap()));
+                }
+            })
+            .unwrap();
 
         handles.push(join_handle);
     }
@@ -67,8 +69,12 @@ fn main() {
         rx.iter().for_each(|(peer, piece_buf)| {
             let pn = big_endian_to_u32(&piece_buf[1..5].try_into().unwrap());
             if !pieces.contains_key(&pn) {
-                // pieces.insert(pn, Piece{buf: vec![0; tf_piece.info.piece_length.try_into().unwrap()] });
-                pieces.insert(pn, Piece::new(tf_piece.info.piece_length));
+                let piece_length = if pn == &tf_piece.info.piece_count - 1 {
+                    tf_piece.info.get_last_piece_size()
+                } else {
+                    tf_piece.info.piece_length
+                };
+                pieces.insert(pn, Piece::new(piece_length));
             }
             pieces.get_mut(&pn).unwrap().add_block(piece_buf);
             if pieces[&pn].block_count == pieces[&pn].block_count_goal {
@@ -76,6 +82,7 @@ fn main() {
                 pieces.remove(&pn);
             }
         });
+        println!("Write thread DONE!");
     }));
 
     let mut missing_pieces = missing_pieces.iter();
@@ -84,12 +91,12 @@ fn main() {
     while piece != None {
         let p = piece.unwrap();
 
-        let peers = peers.clone();
-        let peers = peers
+        let peersclone = peers.clone();
+        let peersclone = peersclone
             .into_iter()
             .filter(|peer| peer.has_piece(*p) && *peer.busy.lock().unwrap() == false)
             .collect::<Vec<Arc<Peer>>>();
-        let peer = peers.first();
+        let peer = peersclone.first();
 
         if peer.is_none() {
             continue;
@@ -97,17 +104,24 @@ fn main() {
 
         let peer = Arc::clone(&peer.unwrap());
 
-        let piece_length = if *p == missing_pieces.len() - 1 {
-            tf.info.length as u32 - (tf.info.piece_length as u32 * (*p as u32 - 1))
+        let piece_length = if *p == tf.info.piece_count as usize - 1 {
+            //last piece
+            tf.info.length as u32 - (tf.info.piece_length as u32 * (*p as u32))
         } else {
             tf.info.piece_length
         };
         let res = peer.request(&peer.stream, *p as u32, piece_length);
-        if res {
-            piece = missing_pieces.next();
-            // println!("Next piece {:?}", piece);
+        match res {
+            Ok(true) => piece = missing_pieces.next(),
+            Ok(false) => (),
+            Err(_e) => {
+                println!("\x1b[91mRemoving peer {} \x1b[0m", peer.id_string());
+                let index = peersclone.iter().position(|x| x.id == peer.id).unwrap();
+                peers.remove(index);
+            }
         }
     }
+    println!("missing_pieces DONE!");
 
     for handle in handles {
         let _r = handle.join();
@@ -186,6 +200,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
 
     rx.iter().take(respone.peers.len()).for_each(|(res, peer)| {
         print!("{} ", peer);
+        //TODO maybe need a result instead of just enum?
         match res {
             Result::Done(s) => {
                 println!("\x1b[1mDone!\x1b[0m {}", s.try_parse_client());
@@ -338,9 +353,13 @@ impl Peer {
         }
 
         let mut message_buf = vec![0u8; message_size as usize];
-        stream
-            .read_exact(&mut message_buf)
-            .expect("Couldn't read buffer");
+        let r = stream.read_exact(&mut message_buf);
+        if let Err(e) = r {
+            panic!(
+                "Couldn't read buffer; {:?}\n message_size {} ",
+                e, message_size,
+            );
+        }
         /*
             keep-alive: <len=0000>
             choke: <len=0001><id=0>
@@ -377,8 +396,8 @@ impl Peer {
                 ));
             }
             5 => {
-                // println!("{} bitfield\n {:?}", self.id_string(), &message_buf[1..]);
                 *self.bitfield.lock().unwrap() = (&message_buf[1..]).to_vec();
+                // println!("{} bitfield\n {:?}", self.id_string(), &message_buf[1..]);
             }
             6 => {
                 println!("request");
@@ -401,7 +420,12 @@ impl Peer {
         None
     }
 
-    fn request(&self, mut stream: &TcpStream, piece_number: u32, piece_length: u32) -> bool {
+    fn request(
+        &self,
+        mut stream: &TcpStream,
+        piece_number: u32,
+        piece_length: u32,
+    ) -> Result<bool> {
         // if self.status.lock().unwrap().1 && self.status.lock().unwrap().2 {
         // println!("peer {} stat {:?}, val {:?}", self.id_string(), self.status, piece_number);
         if let Ok(mut st) = self.status.lock() {
@@ -411,20 +435,23 @@ impl Peer {
                 //send unchoke and interested
                 let r = stream.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
                 match r {
-                    Err(e) if e.kind() == ErrorKind::Interrupted => return false,
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {
+                        println!("\x1b[91mInterrupted\x1b[0m {}", self.id_string());
+                        return Ok(false);
+                    }
                     Err(e) => println!("Error writing buffer: {:?}", e),
                     _ => {}
                 }
                 st.0 = false;
                 st.1 = true;
                 *self.busy.lock().unwrap() = true;
-                return false;
+                return Ok(false);
             }
         }
 
         if self.status.lock().unwrap().2 {
-            println!("Sstill choked");
-            return false;
+            // println!("Sstill choked");
+            return Ok(false);
         }
 
         println!("Request {} from {}", piece_number, self.id_string());
@@ -448,12 +475,11 @@ impl Peer {
             request_message.append(&mut be_offset.to_vec()); //piece uhh, offset?
             request_message.append(&mut block_size.to_be_bytes().to_vec());
             // println!("request_message {:?}", request_message);
-
+            // println!("Request message {:?} from {}", &request_message, self.id_string());
             match stream.write(&request_message) {
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    println!("\x1b[91mError writing buffer: {}\x1b[0m", e.to_string());
-                    continue;
+                    println!("\x1b[91mError writing buffer: {:?}\x1b[0m", e);
                 }
                 _ => {}
             }
@@ -461,7 +487,7 @@ impl Peer {
             left -= block_size;
             offset += block_size;
         }
-        true
+        Ok(true)
     }
 
     fn try_parse_client(&self) -> String {
@@ -570,7 +596,8 @@ impl Peer {
     }
 
     fn id_string(&self) -> String {
-        format!("{}:{}.{}.{}.{}.{}.{}.{}.{}.{}.{}.{}.{}", 
+        format!(
+            "{}:{}.{}.{}.{}.{}.{}.{}.{}.{}.{}.{}.{}",
             String::from_utf8_lossy(&self.id[..8]),
             &self.id[8],
             &self.id[9],
@@ -584,7 +611,7 @@ impl Peer {
             &self.id[17],
             &self.id[18],
             &self.id[19],
-         )
+        )
     }
 
     fn has_piece(&self, piece_number: usize) -> bool {
@@ -669,7 +696,17 @@ struct Piece {
 
 impl Piece {
     fn new(size: u32) -> Piece {
-        let block_count_goal = size / BLOCK_SIZE;
+        /*
+            TODO smaller blocks are only in the last piece
+            maybe i need to get this out of constructor?
+        */
+        let mut remainder = size % BLOCK_SIZE;
+        let mut smaller_blocks = 0;
+        while remainder != 0 {
+            remainder = remainder & (remainder - 1);
+            smaller_blocks += 1;
+        }
+        let block_count_goal = size / BLOCK_SIZE + smaller_blocks;
         Piece {
             buf: vec![0; size.try_into().unwrap()],
             block_count_goal: block_count_goal,
@@ -679,7 +716,6 @@ impl Piece {
 
     fn add_block(&mut self, block: Vec<u8>) {
         self.block_count += 1;
-        // let piece_number = big_endian_to_u32(&block[1..5].try_into().unwrap());
         let offset = big_endian_to_u32(&block[5..9].try_into().unwrap());
 
         // println!(
@@ -688,11 +724,10 @@ impl Piece {
         //     big_endian_to_u32(&block[5..9].try_into().unwrap()),
         // );
 
-        // self.buf.append(&mut block[9..].to_vec());
         let new_buf = [
             &self.buf[..offset as usize],
             &block[9..],
-            &self.buf[(offset + BLOCK_SIZE) as usize..],
+            &self.buf[(offset + block[9..].len() as u32) as usize..],
         ]
         .concat();
         self.buf = new_buf;

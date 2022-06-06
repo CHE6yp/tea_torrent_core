@@ -126,8 +126,11 @@ impl Info {
         if piece > self.pieces.len() / 20 {
             panic!("PIECES ARRAY OVERFLOW!");
         }
-
         &self.pieces[piece * 20..(piece + 1) * 20]
+    }
+
+    pub fn get_last_piece_size(&self) -> u32 {
+        self.length as u32 - (self.piece_length * (self.piece_count - 1))
     }
 
     pub fn get_piece_files(&self, piece: usize) -> (usize, &[File]) {
