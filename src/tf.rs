@@ -99,12 +99,7 @@ impl FromBencode for TorrentFile {
 
 impl fmt::Display for TorrentFile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}info_hash: {}\n",
-            self.info,
-            self.info_hash.as_string(),
-        )
+        write!(f, "{}info_hash: {}", self.info, self.info_hash.as_string(),)
     }
 }
 
@@ -243,16 +238,16 @@ impl FromBencode for Info {
             piece_length.ok_or_else(|| DecodeError::missing_field("piece_length"))?;
         let pieces = pieces.ok_or_else(|| DecodeError::missing_field("pieces"))?;
         let mut length = 0;
-        if len == None && files.len() != 0 {
+        if len == None && !files.is_empty() {
             for f in &files {
                 length += f.length
             }
         } else {
             length = len.ok_or_else(|| DecodeError::missing_field("length"))?;
         }
-        if files.len() == 0 {
+        if files.is_empty() {
             files.push(File {
-                length: length,
+                length,
                 path: PathBuf::from(name.clone()),
             });
         }
@@ -322,13 +317,13 @@ impl InfoHash {
         let mut hasher = Sha1::new();
         hasher.update(bencode);
         let hexes = hasher.finalize();
-        return InfoHash {
+        InfoHash {
             hash: hexes.try_into().expect("Wrong length"),
-        };
+        }
     }
 
     pub fn raw(&self) -> &[u8] {
-        return &self.hash;
+        &self.hash
     }
 
     pub fn as_string(&self) -> String {
@@ -336,7 +331,7 @@ impl InfoHash {
         for i in 0..20 {
             hash += &format!("{:02X}", &self.hash[i]);
         }
-        return hash;
+        hash
     }
 
     pub fn as_string_url_encoded(&self) -> String {
@@ -344,7 +339,7 @@ impl InfoHash {
         for i in 0..20 {
             hash += &format!("%{:02X}", &self.hash[i]);
         }
-        return hash;
+        hash
     }
 }
 

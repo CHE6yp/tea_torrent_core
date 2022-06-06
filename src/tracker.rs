@@ -73,28 +73,28 @@ pub fn connect_to_tracker(
         println!("Connecting to tracker {:?}", tracker);
         let url = format!("{}{}info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
             tracker,
-            if tracker.contains("?") {"&"} else {"?"},
+            if tracker.contains('?') {"&"} else {"?"},
             info_hash,
             length
         );
-        let body = ureq::get(&url)
+
+        ureq::get(&url)
             .set("Content-Type", "application/octet-stream")
-            .call();
-        body
+            .call()
     };
     let to_tracker_response = |resp: Response| -> Result<TrackerResponse, DecodeError> {
         let mut bytes: Vec<u8> = Vec::new();
         resp.into_reader().read_to_end(&mut bytes)?;
-        Ok(TrackerResponse::from_bencode(&bytes)?)
+        TrackerResponse::from_bencode(&bytes)
     };
 
     let mut result;
 
-    if &tf.announce_list != &None {
+    if tf.announce_list != None {
         for tracker_list in tf.announce_list.as_ref().unwrap() {
             for tracker in tracker_list {
                 result = conn(
-                    &tracker,
+                    tracker,
                     &tf.info_hash.as_string_url_encoded(),
                     tf.info.length,
                 );
