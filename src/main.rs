@@ -1,10 +1,7 @@
 use bendy::decoding::FromBencode;
-use sha1::{Digest, Sha1};
-use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::{stdout, ErrorKind, Read, Result, Seek, SeekFrom, Write};
+use std::io::{stdout, ErrorKind, Read, Result, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
@@ -17,6 +14,8 @@ mod tf;
 use crate::tf::*;
 mod tracker;
 use crate::tracker::*;
+mod content;
+use content::*;
 
 const BLOCK_SIZE: u32 = 16384;
 
@@ -29,8 +28,9 @@ fn main() {
     println!("{}", tf);
     println!();
 
-    preallocate(&tf);
-    let missing_pieces = check_file_hash(&tf);
+    let mut content = Content::new(&tf);
+    content.preallocate(&tf);
+    content.check_content_hash(&tf);
 
     let r = connect_to_tracker(&tf, false);
     if r.is_none() {
@@ -44,9 +44,9 @@ fn main() {
     let mut peers = connect_to_peers(respone, &tf);
     let mut handles: Vec<thread::JoinHandle<_>> = vec![];
 
-    let tf = Arc::new(tf);
     let (tx, rx) = channel();
 
+    //recieving messages from peers
     for peer in &peers {
         let peer = Arc::clone(peer);
         let tx = tx.clone();
@@ -64,29 +64,38 @@ fn main() {
         handles.push(join_handle);
     }
 
-    let tf_piece = Arc::clone(&tf);
+    let tf = Arc::new(tf);
+    //revieving blocks and writing them to pieces (and then to file)
+    let mut content_piece = content.clone();
     handles.push(thread::spawn(move || {
-        let mut pieces = HashMap::new();
         rx.iter().for_each(|(peer, piece_buf)| {
             let pn = big_endian_to_u32(&piece_buf[1..5].try_into().unwrap());
-            pieces.entry(pn).or_insert_with(|| {
-                let piece_length = if pn == &tf_piece.info.piece_count - 1 {
-                    tf_piece.info.get_last_piece_size()
-                } else {
-                    tf_piece.info.piece_length
-                };
-                Piece::new(piece_length)
-            });
-            pieces.get_mut(&pn).unwrap().add_block(piece_buf);
-            if pieces[&pn].block_count == pieces[&pn].block_count_goal {
-                pieces[&pn].write(pn, peer, &tf_piece);
-                pieces.remove(&pn);
+            let r = &content_piece.add_block(pn, piece_buf);
+            match r {
+                Some(true) => {
+                    println!(
+                        " \x1b[92mCorrect hash!\x1b[0m Piece {} from {}",
+                        pn,
+                        peer.id_string(),
+                    );
+                    *peer.busy.lock().unwrap() = false;
+                }
+                Some(false) => {
+                    println!(
+                        " \x1b[91mHash doesn't match!\x1b[0m Piece {} from{}",
+                        pn,
+                        peer.id_string(),
+                    );
+                    *peer.busy.lock().unwrap() = false;
+                }
+                None => (),
             }
         });
         println!("Write thread DONE!");
     }));
 
-    let mut missing_pieces = missing_pieces.iter();
+    //sending messages to peers
+    let mut missing_pieces = content.missing_pieces.iter();
     let mut piece = missing_pieces.next();
 
     while piece != None {
@@ -227,76 +236,6 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
     streams
 }
 
-fn check_file_hash(tf: &TorrentFile) -> Vec<usize> {
-    println!("Checking files hash");
-    let mut missing_pieces = vec![];
-
-    let pool = ThreadPool::new(9);
-
-    let (tx, rx) = channel();
-
-    for p in 0..tf.info.piece_count {
-        let mut read_buf = Vec::with_capacity(tf.info.piece_length as usize);
-        let (offset, files) = tf.info.get_piece_files(p as usize);
-
-        let mut first = true;
-        let mut r = 0;
-        for file in files {
-            let file_path = format!(
-                "downloads/{}",
-                if tf.info.files.len() > 1 {
-                    &tf.info.name
-                } else {
-                    ""
-                }
-            );
-            let path = std::path::Path::new(&file_path);
-            let mut fc = file.clone();
-            fc.path = path.join(file.path.clone());
-
-            let mut f = OpenOptions::new().read(true).open(fc.path).unwrap();
-
-            if first {
-                f.seek(SeekFrom::Start(offset as u64)).expect("seek failed");
-                first = false;
-            }
-
-            r += f
-                .take(tf.info.piece_length as u64 - r as u64)
-                .read_to_end(&mut read_buf)
-                .unwrap();
-        }
-        let tx = tx.clone();
-
-        pool.execute(move || {
-            let mut hasher = Sha1::new();
-
-            hasher.update(&read_buf);
-            let hexes = hasher.finalize();
-
-            let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
-            tx.send((p, hexes))
-                .expect("channel will be there waiting for the pool");
-        });
-    }
-
-    rx.iter()
-        .take(tf.info.piece_count as usize)
-        .for_each(|(p, hexes)| {
-            if hexes != tf.info.get_piece_hash(p as usize) {
-                print!("\x1b[91m");
-                missing_pieces.push(p as usize);
-            } else {
-                print!("\x1b[92m");
-            }
-            print!("{} ", p);
-            stdout().flush().unwrap();
-        });
-
-    println!("\x1b[0m");
-    missing_pieces
-}
-
 fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
     ((value[0] as u32) << 24)
         + ((value[1] as u32) << 16)
@@ -305,7 +244,7 @@ fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
 }
 
 #[derive(Debug)]
-struct Peer {
+pub struct Peer {
     id: [u8; 20],
     stream: TcpStream,
     bitfield: Mutex<Vec<u8>>,
@@ -640,155 +579,5 @@ impl Peer {
             7 => 0b00000001,
             _ => unreachable!(),
         };
-    }
-}
-
-fn preallocate(tf: &TorrentFile) {
-    println!("Preallocating files");
-    let file_path = format!(
-        "downloads/{}",
-        if tf.info.files.len() > 1 {
-            &tf.info.name
-        } else {
-            ""
-        }
-    );
-    let path = std::path::Path::new(&file_path);
-    //TODO ok wtf did i do here?
-    let files: Vec<tf::File> = tf
-        .info
-        .files
-        .iter()
-        .map(|f| -> tf::File {
-            let mut fc = f.clone();
-            fc.path = path.join(f.path.clone());
-            fc
-        })
-        .collect();
-
-    for file in files {
-        if let Some(dir_path) = file.path.as_path().parent() {
-            fs::create_dir_all(dir_path).unwrap();
-        }
-
-        //preallocate file
-        let f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(file.path)
-            .unwrap();
-        f.set_len(file.length as u64).unwrap();
-    }
-    println!("Preallocation complete");
-}
-
-#[derive(Debug)]
-struct Piece {
-    buf: Vec<u8>,
-    block_count: u32,
-    block_count_goal: u32,
-}
-
-impl Piece {
-    fn new(size: u32) -> Piece {
-        /*
-            TODO smaller blocks are only in the last piece
-            maybe i need to get this out of constructor?
-        */
-        let mut remainder = size % BLOCK_SIZE;
-        let mut smaller_blocks = 0;
-        while remainder != 0 {
-            remainder = remainder & (remainder - 1);
-            smaller_blocks += 1;
-        }
-        let block_count_goal = size / BLOCK_SIZE + smaller_blocks;
-        Piece {
-            buf: vec![0; size.try_into().unwrap()],
-            block_count_goal,
-            block_count: 0,
-        }
-    }
-
-    fn add_block(&mut self, block: Vec<u8>) {
-        self.block_count += 1;
-        let offset = big_endian_to_u32(&block[5..9].try_into().unwrap());
-
-        // println!(
-        //     "Got piece {} of {{}} ({{}}%), offset {}/{{}} ({{}}%)  from {{}}",
-        //     big_endian_to_u32(&block[1..5].try_into().unwrap()),
-        //     big_endian_to_u32(&block[5..9].try_into().unwrap()),
-        // );
-
-        let new_buf = [
-            &self.buf[..offset as usize],
-            &block[9..],
-            &self.buf[(offset + block[9..].len() as u32) as usize..],
-        ]
-        .concat();
-        self.buf = new_buf;
-    }
-
-    fn write(&self, piece_number: u32, peer: Arc<Peer>, tf: &TorrentFile) -> bool {
-        //if whole piece is downloaded
-        let mut buffer = self.buf.clone();
-        //check hash
-        let mut hasher = Sha1::new();
-        hasher.update(&buffer);
-        let hexes = hasher.finalize();
-        let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
-        if hexes != tf.info.get_piece_hash(piece_number as usize) {
-            println!(
-                " \x1b[91mHash doesn't match!\x1b[0m Piece {} from{}",
-                piece_number,
-                peer.id_string(),
-            );
-            *peer.busy.lock().unwrap() = false;
-            return false;
-        }
-
-        println!(
-            " \x1b[92mCorrect hash!\x1b[0m Piece {} from {}",
-            piece_number,
-            peer.id_string(),
-        );
-        //==========
-        let (mut of, files) = tf.info.get_piece_files(piece_number as usize);
-
-        let mut prev_written_bytes = 0;
-        for file in files {
-            let file_path = format!(
-                "downloads/{}",
-                if tf.info.files.len() > 1 {
-                    &tf.info.name
-                } else {
-                    ""
-                }
-            );
-            let path = std::path::Path::new(&file_path);
-            let mut fc = file.clone();
-            fc.path = path.join(file.path.clone());
-            let mut f = OpenOptions::new().write(true).open(fc.path).unwrap();
-
-            f.seek(SeekFrom::Start(of as u64)).expect("seek failed");
-
-            let how_much = std::cmp::min(
-                file.length - of,
-                tf.info.piece_length as usize - prev_written_bytes,
-            );
-            let written = f.write(&buffer[..how_much]);
-            match written {
-                Ok(count) => {
-                    prev_written_bytes = count;
-                    buffer.drain(..count);
-                    of = 0;
-                }
-                Err(e) => {
-                    println!("Write failed\n{:?}", e);
-                }
-            }
-        }
-
-        *peer.busy.lock().unwrap() = false;
-        true
     }
 }
