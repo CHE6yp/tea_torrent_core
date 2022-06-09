@@ -258,7 +258,7 @@ impl Peer {
         //self.stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
         let mut message_size = [0u8; 4];
         let mut stream = &self.stream;
-        let package_size = stream.read(&mut message_size);
+        let package_size = stream.read_exact(&mut message_size);
         match package_size {
             Ok(_package_size) => {} //println!("package_size {}", package_size),
             Err(e) => {
@@ -284,7 +284,6 @@ impl Peer {
                 }
             }
         }
-
         let message_size = big_endian_to_u32(&message_size);
         if message_size == 0 {
             // println!("Got keep alive");
@@ -296,7 +295,8 @@ impl Peer {
         if let Err(e) = r {
             panic!(
                 "Couldn't read buffer; {:?}\n message_size {} ",
-                e, message_size,
+                e.kind(),
+                message_size
             );
         }
         /*
@@ -347,7 +347,7 @@ impl Peer {
                 println!("cancel");
             }
             9 => {
-                println!("port");
+                println!("port {}", self.id_string());
             }
             _ => {
                 panic!("Unknown message!");

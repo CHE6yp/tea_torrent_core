@@ -18,6 +18,8 @@ use threadpool::ThreadPool;
 #[derive(Debug, Clone)]
 pub struct Content {
     pieces: HashMap<u32, Piece>,
+    tf: TorrentFile,
+    piece_count: usize,
     files: Vec<tf::File>,
     pub missing_pieces: Vec<usize>,
     available_pieces: Vec<usize>,
@@ -26,18 +28,22 @@ pub struct Content {
 
 impl Content {
     pub fn new(tf: &TorrentFile) -> Content {
-        let mut pieces = HashMap::new();
-        for i in 0..tf.info.piece_count - 1 {
-            pieces.insert(i, Piece::new(i, tf.info.piece_length, tf));
-        }
-        //last piece is probably a different size
-        pieces.insert(
-            tf.info.piece_count - 1,
-            Piece::new(tf.info.piece_count - 1, tf.info.get_last_piece_size(), tf),
-        );
+        let pieces = HashMap::new();
+        /*
+            for i in 0..tf.info.piece_count - 1 {
+                pieces.insert(i, Piece::new(i, tf.info.piece_length, tf));
+            }
+            //last piece is probably a different size
+            pieces.insert(
+                tf.info.piece_count - 1,
+                Piece::new(tf.info.piece_count - 1, tf.info.get_last_piece_size(), tf),
+            );
+        */
 
         Content {
             pieces: pieces,
+            tf: tf.clone(),
+            piece_count: tf.info.piece_count as usize,
             files: vec![],
             missing_pieces: vec![],
             available_pieces: vec![],
@@ -159,10 +165,35 @@ impl Content {
         self.available_pieces = available_pieces;
     }
 
-    pub fn add_block(&mut self, piece: u32, block: Vec<u8>) -> Option<bool> {
-        self.pieces.get_mut(&piece).unwrap().add_block(block)
+    pub fn add_block(&mut self, piece_number: u32, block: Vec<u8>) -> Option<bool> {
+        let piece: &mut Piece;
+        match self.pieces.get_mut(&piece_number) {
+            Some(p) => piece = p,
+            None => {
+                if self.piece_count - 1 == piece_number as usize {
+                    self.pieces.insert(
+                        piece_number,
+                        Piece::new(
+                            (self.piece_count - 1) as u32,
+                            self.tf.info.get_last_piece_size(),
+                            &self.tf,
+                        ),
+                    );
+                } else {
+                    self.pieces.insert(
+                        piece_number,
+                        Piece::new(piece_number, self.tf.info.piece_length, &self.tf),
+                    );
+                }
+                piece = self.pieces.get_mut(&piece_number).unwrap();
+            }
+        }
 
-        // self.pieces.remove(&piece);
+        let r = piece.add_block(block);
+        if let Some(_) = r {
+            self.pieces.remove(&piece_number);
+        }
+        r
     }
 }
 
