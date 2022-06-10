@@ -1,11 +1,10 @@
-use std::path::PathBuf;
-
 use crate::big_endian_to_u32;
 use crate::tf;
 use crate::BLOCK_SIZE;
 use fs::OpenOptions;
 use sha1::Digest;
 use sha1::Sha1;
+use std::path::PathBuf;
 
 use std::fs;
 use std::io::stdout;
@@ -14,8 +13,9 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
 use std::sync::mpsc::channel;
+use std::thread;
 use tf::TorrentFile;
-use threadpool::ThreadPool;
+// use threadpool::ThreadPool;
 
 #[derive(Debug, Clone)]
 pub struct Content {
@@ -128,46 +128,46 @@ impl Content {
         let mut missing_pieces = vec![];
         let mut available_pieces = vec![];
 
-        let pool = ThreadPool::new(9);
+        // let pool = ThreadPool::new(9);
 
         let (tx, rx) = channel();
 
-        for piece in &self.pieces {
-            let mut read_buf = Vec::with_capacity(piece.size as usize);
-            // let (offset, files) = Content::get_piece_files(piece.number as usize);
-            let offset = piece.offset;
-            let files = &piece.files;
-
-            let mut first = true;
-            let mut r = 0;
-            for file in files {
-                let mut f = OpenOptions::new()
-                    .read(true)
-                    .open(file.0.as_path())
-                    .unwrap();
-
-                if first {
-                    f.seek(SeekFrom::Start(offset as u64)).expect("seek failed");
-                    first = false;
-                }
-
-                r += f
-                    .take(piece.size as u64 - r as u64)
-                    .read_to_end(&mut read_buf)
-                    .unwrap();
-            }
+        for piece in &mut self.pieces {
             let tx = tx.clone();
 
-            let p = piece.clone();
-
-            // let check_hash_and_send = move |tx: std::sync::mpsc::Sender<(u32,bool)>, piece: &Piece, buffer: &[u8]| {
-            //     tx.send((piece.number, piece.check_hash(buffer)))
+            // pool.execute(move || {
+            //     tx.send((p.lock().unwrap().number, p.lock().unwrap().check_hash(&read_buf)))
             //         .expect("channel will be there waiting for the pool");
-            // };
-            pool.execute(move || {
-                tx.send((p.number, p.check_hash(&read_buf)))
-                    .expect("channel will be there waiting for the pool");
-                // check_hash_and_send(tx, &piece, &read_buf)
+            //     // check_hash_and_send(tx, &piece, &read_buf)
+            // });
+            thread::scope(|s| {
+                s.spawn(move || {
+                    let mut read_buf = Vec::with_capacity(piece.size as usize);
+                    let offset = piece.offset;
+                    let files = &piece.files;
+
+                    let mut first = true;
+                    let mut r = 0;
+                    for file in files {
+                        let mut f = OpenOptions::new()
+                            .read(true)
+                            .open(file.0.as_path())
+                            .unwrap();
+
+                        if first {
+                            f.seek(SeekFrom::Start(offset as u64)).expect("seek failed");
+                            first = false;
+                        }
+
+                        r += f
+                            .take(piece.size as u64 - r as u64)
+                            .read_to_end(&mut read_buf)
+                            .unwrap();
+                    }
+                    tx.send((piece.number, piece.check_hash(&read_buf)))
+                        .expect("channel will be there waiting for the pool");
+                    // check_hash_and_send(tx, &piece, &read_buf)
+                });
             });
         }
 
@@ -310,7 +310,7 @@ impl Piece {
         None
     }
 
-    pub fn write(&self) -> bool {
+    pub fn write(&mut self) -> bool {
         //if whole piece is downloaded
         let mut buffer = self.buf.clone();
         let mut offset = self.offset;
@@ -348,12 +348,15 @@ impl Piece {
         true
     }
 
-    pub fn check_hash(&self, buffer: &[u8]) -> bool {
+    pub fn check_hash(&mut self, buffer: &[u8]) -> bool {
         //check hash
         let mut hasher = Sha1::new();
         hasher.update(buffer);
         let hexes = hasher.finalize();
         let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
+        if hexes == self.hash {
+            self.status = PieceStatus::Available;
+        }
         hexes == self.hash
     }
 }

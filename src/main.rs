@@ -1,3 +1,4 @@
+#![feature(scoped_threads)] //TODO this will stop being nightly soon
 use bendy::decoding::FromBencode;
 use std::env;
 use std::fs;
