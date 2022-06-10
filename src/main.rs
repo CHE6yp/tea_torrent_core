@@ -70,13 +70,16 @@ fn main() {
     let mut content_piece = content.clone();
     handles.push(thread::spawn(move || {
         rx.iter().for_each(|(peer, piece_buf)| {
-            let pn = big_endian_to_u32(&piece_buf[1..5].try_into().unwrap());
-            let r = &content_piece.add_block(pn, piece_buf);
+            let piece_number = big_endian_to_u32(&piece_buf[1..5].try_into().unwrap());
+            let offset = big_endian_to_u32(&piece_buf[5..9].try_into().unwrap());
+
+            let r =
+                &content_piece.add_block(piece_number as usize, offset as usize, &piece_buf[9..]);
             match r {
                 Some(true) => {
                     println!(
                         " \x1b[92mCorrect hash!\x1b[0m Piece {} from {}",
-                        pn,
+                        piece_number,
                         peer.id_string(),
                     );
                     *peer.busy.lock().unwrap() = false;
@@ -84,7 +87,7 @@ fn main() {
                 Some(false) => {
                     println!(
                         " \x1b[91mHash doesn't match!\x1b[0m Piece {} from{}",
-                        pn,
+                        piece_number,
                         peer.id_string(),
                     );
                     *peer.busy.lock().unwrap() = false;

@@ -1,4 +1,3 @@
-use crate::big_endian_to_u32;
 use crate::tf;
 use crate::BLOCK_SIZE;
 use fs::OpenOptions;
@@ -19,11 +18,7 @@ use tf::TorrentFile;
 
 #[derive(Debug, Clone)]
 pub struct Content {
-    // pieces: HashMap<u32, Piece>,
     pieces: Vec<Piece>,
-    tf: TorrentFile,
-    piece_count: usize,
-    // files: Vec<tf::File>,
     files: Vec<(PathBuf, usize)>,
     pub missing_pieces: Vec<usize>,
     available_pieces: Vec<usize>,
@@ -95,9 +90,6 @@ impl Content {
 
         Content {
             pieces: pieces,
-            // piecesb: vec![],
-            tf: tf.clone(),
-            piece_count: tf.info.piece_count as usize,
             files,
             missing_pieces: vec![],
             available_pieces: vec![],
@@ -128,6 +120,7 @@ impl Content {
         let mut missing_pieces = vec![];
         let mut available_pieces = vec![];
 
+        //todo maybe return this threadPool?
         // let pool = ThreadPool::new(9);
 
         let (tx, rx) = channel();
@@ -166,7 +159,6 @@ impl Content {
                     }
                     tx.send((piece.number, piece.check_hash(&read_buf)))
                         .expect("channel will be there waiting for the pool");
-                    // check_hash_and_send(tx, &piece, &read_buf)
                 });
             });
         }
@@ -190,14 +182,8 @@ impl Content {
         self.available_pieces = available_pieces;
     }
 
-    pub fn add_block(&mut self, piece_number: u32, block: Vec<u8>) -> Option<bool> {
-        let r = self.pieces[piece_number as usize].add_block(block);
-
-        // let r = piece.add_block(block);
-        if r.is_some() {
-            // self.pieces.remove(&piece_number);
-        }
-        r
+    pub fn add_block(&mut self, piece_number: usize, offset: usize, block: &[u8]) -> Option<bool> {
+        self.pieces[piece_number].add_block(offset, block)
     }
 
     pub fn get_piece_files(
@@ -286,20 +272,13 @@ impl Piece {
         }
     }
 
-    pub fn add_block(&mut self, block: Vec<u8>) -> Option<bool> {
+    pub fn add_block(&mut self, offset: usize, block: &[u8]) -> Option<bool> {
         self.block_count += 1;
-        let offset = big_endian_to_u32(&block[5..9].try_into().unwrap());
-
-        // println!(
-        //     "Got piece {} of {{}} ({{}}%), offset {}/{{}} ({{}}%)  from {{}}",
-        //     big_endian_to_u32(&block[1..5].try_into().unwrap()),
-        //     big_endian_to_u32(&block[5..9].try_into().unwrap()),
-        // );
 
         let new_buf = [
-            &self.buf[..offset as usize],
-            &block[9..],
-            &self.buf[(offset + block[9..].len() as u32) as usize..],
+            &self.buf[..offset],
+            &block,
+            &self.buf[offset + block.len()..],
         ]
         .concat();
         self.buf = new_buf;
@@ -319,10 +298,7 @@ impl Piece {
             return false;
         }
 
-        //==========
-
         let mut prev_written_bytes = 0;
-        // let (mut offset, files) = self.get_piece_files(self.number as usize);
         for file in &self.files {
             let mut f = OpenOptions::new()
                 .write(true)
@@ -344,12 +320,10 @@ impl Piece {
                 }
             }
         }
-
         true
     }
 
     pub fn check_hash(&mut self, buffer: &[u8]) -> bool {
-        //check hash
         let mut hasher = Sha1::new();
         hasher.update(buffer);
         let hexes = hasher.finalize();
