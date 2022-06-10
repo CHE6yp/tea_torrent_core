@@ -29,8 +29,8 @@ fn main() {
     println!();
 
     let mut content = Content::new(&tf);
-    content.preallocate(&tf);
-    content.check_content_hash(&tf);
+    content.preallocate();
+    content.check_content_hash();
 
     let r = connect_to_tracker(&tf, false);
     if r.is_none() {
