@@ -222,12 +222,11 @@ impl Content {
 }
 
 #[derive(Debug, Clone)]
-pub struct Piece {
+struct Piece {
     number: u32,
     size: u32,
     offset: usize,
     status: PieceStatus,
-    buf: Vec<u8>,
     hash: [u8; 20],
     //TODO
     //make files a slice, I DARE YOU
@@ -235,12 +234,12 @@ pub struct Piece {
     //a liftime of lifitime annotations
     //hell
     files: Vec<(PathBuf, usize)>,
-    pub block_count: u32,
-    pub block_count_goal: u32,
+    block_count: u32,
+    block_count_goal: u32,
 }
 
 impl Piece {
-    pub fn new(
+    fn new(
         number: u32,
         size: u32,
         offset: usize,
@@ -266,22 +265,23 @@ impl Piece {
             status: PieceStatus::Missing,
             files: files.to_vec(),
             offset,
-            buf: vec![0; size.try_into().unwrap()],
             block_count_goal,
             block_count: 0,
         }
     }
 
-    pub fn add_block(&mut self, offset: usize, block: &[u8]) -> Option<bool> {
+    fn add_block(&mut self, offset: usize, block: &[u8]) -> Option<bool> {
         self.block_count += 1;
 
-        let new_buf = [
-            &self.buf[..offset],
-            &block,
-            &self.buf[offset + block.len()..],
-        ]
-        .concat();
-        self.buf = new_buf;
+        let buf = match &self.status {
+            PieceStatus::Missing => vec![0u8; self.size.try_into().unwrap()],
+            PieceStatus::Awaiting(b) => b.to_vec(),
+            PieceStatus::Available => panic!("This piece is already available"),
+        };
+
+        let new_buf = [&buf[..offset], &block, &buf[offset + block.len()..]].concat();
+
+        self.status = PieceStatus::Awaiting(new_buf);
 
         if self.block_count == self.block_count_goal {
             return Some(self.write());
@@ -289,48 +289,56 @@ impl Piece {
         None
     }
 
-    pub fn write(&mut self) -> bool {
+    fn write(&mut self) -> bool {
         //if whole piece is downloaded
-        let mut buffer = self.buf.clone();
-        let mut offset = self.offset;
+        if let PieceStatus::Awaiting(mut buffer) = self.status.clone() {
+            let mut offset = self.offset;
 
-        if !self.check_hash(&buffer) {
-            return false;
-        }
+            if !self.check_hash(&buffer) {
+                self.status = PieceStatus::Missing;
+                return false;
+            }
 
-        let mut prev_written_bytes = 0;
-        for file in &self.files {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .open(file.0.as_path())
-                .unwrap();
+            let mut prev_written_bytes = 0;
+            for file in &self.files {
+                let mut f = OpenOptions::new()
+                    .write(true)
+                    .open(file.0.as_path())
+                    .unwrap();
 
-            f.seek(SeekFrom::Start(offset as u64)).expect("seek failed");
+                f.seek(SeekFrom::Start(offset as u64)).expect("seek failed");
 
-            let how_much = std::cmp::min(file.1 - offset, self.buf.len() - prev_written_bytes);
-            let written = f.write(&buffer[..how_much]);
-            match written {
-                Ok(count) => {
-                    prev_written_bytes = count;
-                    buffer.drain(..count);
-                    offset = 0;
-                }
-                Err(e) => {
-                    println!("Write failed\n{:?}", e);
+                let how_much =
+                    std::cmp::min(file.1 - offset, self.size as usize - prev_written_bytes);
+                let written = f.write(&buffer[..how_much]);
+                match written {
+                    Ok(count) => {
+                        prev_written_bytes = count;
+                        buffer.drain(..count);
+                        offset = 0;
+                    }
+                    Err(e) => {
+                        println!("Write failed\n{:?}", e);
+                    }
                 }
             }
+            self.status = PieceStatus::Available;
+            true
+        } else {
+            panic!("Trying to write a piece with no buffer");
         }
-        true
     }
 
-    pub fn check_hash(&mut self, buffer: &[u8]) -> bool {
+    fn check_hash(&mut self, buffer: &[u8]) -> bool {
         let mut hasher = Sha1::new();
         hasher.update(buffer);
         let hexes = hasher.finalize();
         let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
-        if hexes == self.hash {
-            self.status = PieceStatus::Available;
-        }
+        self.status = if hexes == self.hash {
+            PieceStatus::Available
+        } else {
+            PieceStatus::Missing
+        };
         hexes == self.hash
     }
 }
