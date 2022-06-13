@@ -126,35 +126,6 @@ impl Info {
     pub fn get_last_piece_size(&self) -> u32 {
         self.length as u32 - (self.piece_length * (self.piece_count - 1))
     }
-
-    pub fn get_piece_files(&self, piece: usize) -> (usize, &[File]) {
-        let mut l = 0;
-        let mut first_file = 0;
-        let mut last_file = 0;
-        for fnum in 0..self.files.len() {
-            l += self.files[fnum].length;
-            if (piece + 1) * self.piece_length as usize > self.length {
-                last_file = self.files.len() - 1;
-                break;
-            }
-            if (piece + 1) * self.piece_length as usize <= l {
-                last_file = fnum;
-                break;
-            }
-        }
-        l = 0;
-        for fnum in 0..self.files.len() {
-            l += self.files[fnum].length;
-            if piece * self.piece_length as usize <= l {
-                first_file = fnum;
-                break;
-            }
-        }
-
-        let first_offset =
-            self.files[first_file].length - (l - (piece * self.piece_length as usize));
-        (first_offset, &self.files[first_file..=last_file])
-    }
 }
 
 impl FromBencode for Info {

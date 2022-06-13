@@ -1,4 +1,5 @@
 #![feature(scoped_threads)] //TODO this will stop being nightly soon
+use std::sync::mpsc::Sender;
 use bendy::decoding::FromBencode;
 use std::env;
 use std::fs;
@@ -150,7 +151,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
 
     enum Result {
         Done(Peer),
-        Timeout,
+        Error,
         InvalidHash,
     }
 
@@ -166,7 +167,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
 
         pool.execute(move || {
             stdout().flush().unwrap();
-            let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(10));
+            let stream = TcpStream::connect_timeout(&respone.peers[i], Duration::from_secs(2));
 
             if let Ok(mut s) = stream {
                 //s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
@@ -179,10 +180,10 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
                 let _r = s.write(&arr).expect("Couldn't write buffer; Handshake");
                 //reading handshake
                 let mut handshake_buff = [0u8; 68];
-                let _r = s.read(&mut handshake_buff);
+                let _r = s.read_exact(&mut handshake_buff);
 
                 if let Err(_e) = _r {
-                    tx.send((Result::Timeout, respone.peers[i]))
+                    tx.send((Result::Error, respone.peers[i]))
                         .expect("channel will be there waiting for the pool");
                     return;
                 }
@@ -206,7 +207,7 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
                 ))
                 .expect("channel will be there waiting for the pool");
             } else {
-                tx.send((Result::Timeout, respone.peers[i]))
+                tx.send((Result::Error, respone.peers[i]))
                     .expect("channel will be there waiting for the pool");
             }
         });
@@ -220,19 +221,10 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
                 println!("\x1b[1mDone!\x1b[0m {}", s.try_parse_client());
                 streams.push(Arc::new(s));
             }
-            Result::Timeout => {
+            Result::Error => {
                 println!("\x1b[91mFailed!\x1b[0m");
             }
             Result::InvalidHash => {
-                // println!(
-                //     "{};\n extentions {:?}\n info_hash {}\n vs our    {}\n peer id {} ({})",
-                //     String::from_utf8_lossy(&handshake_buff[1..20]),
-                //     &handshake_buff[20..28],
-                //     String::from_utf8_lossy(&handshake_buff[28..48]),
-                //     String::from_utf8_lossy(&info_hash),
-                //     String::from_utf8_lossy(&handshake_buff[48..68]),
-                //     try_parse_client(&handshake_buff[48..68])
-                // );
                 println!("\x1b[91mInvalid info hash!\x1b[0m");
             }
         }
@@ -328,9 +320,11 @@ impl Peer {
             }
             2 => {
                 println!("interested");
+                self.status.lock().unwrap().3 = true;
             }
             3 => {
                 println!("not interested");
+                self.status.lock().unwrap().3 = false;
             }
             4 => {
                 self.add_piece_to_bitfield(big_endian_to_u32(

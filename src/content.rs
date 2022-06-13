@@ -36,7 +36,7 @@ impl Content {
                 ""
             }
         );
-        //TODO ok wtf did i do here?
+        //I think im converting tfFile to content File here
         let files: Vec<(PathBuf, usize)> = tf
             .info
             .files
