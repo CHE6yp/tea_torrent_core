@@ -1,7 +1,7 @@
 #![feature(scoped_threads)] //TODO this will stop being nightly soon
 
 use bendy::decoding::FromBencode;
-use std::env;
+
 use std::fs;
 use std::io::{stdout, ErrorKind, Read, Result, Write};
 use std::net::TcpStream;
@@ -22,7 +22,6 @@ use content::*;
 const BLOCK_SIZE: u32 = 16384;
 
 pub fn run(args: Vec<String>) {
-    
     let x = fs::read(&args[1]).unwrap();
 
     let tf = TorrentFile::from_bencode(&x).unwrap();
@@ -54,10 +53,45 @@ pub fn run(args: Vec<String>) {
         let join_handle = thread::Builder::new()
             .name(peer.id_string())
             .spawn(move || loop {
-                let r = peer.get_message();
-                if let Some(r) = r {
-                    //TODO wanna send this inside get_message()
-                    let _r = tx.send((Arc::clone(&peer), r));
+                let message = peer.get_message();
+
+                match message {
+                    PeerMessage::KeepAlive => (),
+                    PeerMessage::Choke => {
+                        println!("Choked by {}", peer.id_string());
+                        peer.status.lock().unwrap().2 = true;
+                    }
+                    PeerMessage::Unchoke => {
+                        println!("Unchoked by {}", peer.id_string());
+                        peer.status.lock().unwrap().2 = false;
+                        *peer.busy.lock().unwrap() = false;
+                    }
+                    PeerMessage::Interested => {
+                        println!("interested");
+                        peer.status.lock().unwrap().3 = true;
+                    }
+                    PeerMessage::NotInterested => {
+                        println!("not interested");
+                        peer.status.lock().unwrap().3 = false;
+                    }
+                    PeerMessage::Have(index) => {
+                        peer.add_piece_to_bitfield(index);
+                    }
+                    PeerMessage::Bitfield(field) => {
+                        *peer.bitfield.lock().unwrap() = field;
+                    }
+                    PeerMessage::Request(_index, _begin, _length) => {
+                        println!("request");
+                    }
+                    PeerMessage::Piece(index, begin, block) => {
+                        tx.send((Arc::clone(&peer), (index, begin, block))).unwrap();
+                    }
+                    PeerMessage::Cancel(_index, _begin, _length) => {
+                        println!("cancel");
+                    }
+                    PeerMessage::Port(_port) => {
+                        println!("port {}", peer.id_string());
+                    }
                 }
             })
             .unwrap();
@@ -69,12 +103,11 @@ pub fn run(args: Vec<String>) {
     //revieving blocks and writing them to pieces (and then to file)
     let mut content_piece = content.clone();
     handles.push(thread::spawn(move || {
-        rx.iter().for_each(|(peer, piece_buf)| {
-            let piece_number = big_endian_to_u32(&piece_buf[1..5].try_into().unwrap());
-            let offset = big_endian_to_u32(&piece_buf[5..9].try_into().unwrap());
+        rx.iter().for_each(|(peer, (index, begin, block))| {
+            let piece_number = index;
+            let offset = begin;
 
-            let r =
-                &content_piece.add_block(piece_number as usize, offset as usize, &piece_buf[9..]);
+            let r = &content_piece.add_block(piece_number as usize, offset as usize, &block);
             match r {
                 Some(true) => {
                     println!(
@@ -231,11 +264,17 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
     streams
 }
 
-fn big_endian_to_u32(value: &[u8; 4]) -> u32 {
-    ((value[0] as u32) << 24)
-        + ((value[1] as u32) << 16)
-        + ((value[2] as u32) << 8)
-        + value[3] as u32
+//TODO there is a std function u32::from_be_bytes, better use that
+//but it does want an array of 4
+fn big_endian_to_u32(value: &[u8]) -> u32 {
+    let length = value.len();
+    let mut result = 0;
+    let mut i = 0;
+    while i < 4 && i < length {
+        result += (value[length - (i + 1)] as u32) << i * 8;
+        i += 1;
+    }
+    result
 }
 
 #[derive(Debug)]
@@ -249,7 +288,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    fn get_message(&self) -> Option<Vec<u8>> {
+    fn get_message(&self) -> PeerMessage {
         //self.stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
         let mut message_size = [0u8; 4];
         let mut stream = &self.stream;
@@ -264,7 +303,8 @@ impl Peer {
                 match r {
                     Err(e) if e.kind() == ErrorKind::Interrupted => {
                         println!("\x1b[91mInterrupted\x1b[0m {}", self.id_string());
-                        return None;
+                        // return None; TODO
+                        return PeerMessage::KeepAlive;
                     }
                     Err(e) if e.kind() == ErrorKind::ConnectionReset => {
                         println!("\x1b[91mConnection Reset\x1b[0m {}", self.id_string());
@@ -279,10 +319,10 @@ impl Peer {
                 }
             }
         }
-        let message_size = big_endian_to_u32(&message_size);
+        let message_size = big_endian_to_u32(message_size.as_ref());
         if message_size == 0 {
             // println!("Got keep alive");
-            return None;
+            return PeerMessage::KeepAlive;
         }
 
         let mut message_buf = vec![0u8; message_size as usize];
@@ -308,49 +348,32 @@ impl Peer {
             port: <len=0003><id=9><listen-port>
         */
         match &message_buf[0] {
-            0 => {
-                println!("Choked by {}", self.id_string());
-                self.status.lock().unwrap().2 = true;
-            }
-            1 => {
-                println!("Unchoked by {}", self.id_string());
-                self.status.lock().unwrap().2 = false;
-                *self.busy.lock().unwrap() = false;
-            }
-            2 => {
-                println!("interested");
-                self.status.lock().unwrap().3 = true;
-            }
-            3 => {
-                println!("not interested");
-                self.status.lock().unwrap().3 = false;
-            }
-            4 => {
-                self.add_piece_to_bitfield(big_endian_to_u32(
-                    &message_buf[1..].try_into().unwrap(),
-                ));
-            }
-            5 => {
-                *self.bitfield.lock().unwrap() = (&message_buf[1..]).to_vec();
-            }
-            6 => {
-                println!("request");
-            }
-            7 => {
-                return Some(message_buf);
-                //tx.send((&self, message_buf));
-            }
-            8 => {
-                println!("cancel");
-            }
-            9 => {
-                println!("port {}", self.id_string());
-            }
+            0 => PeerMessage::Choke,
+            1 => PeerMessage::Unchoke,
+            2 => PeerMessage::Interested,
+            3 => PeerMessage::NotInterested,
+            4 => PeerMessage::Have(big_endian_to_u32(&message_buf[1..])),
+            5 => PeerMessage::Bitfield((&message_buf[1..]).to_vec()),
+            6 => PeerMessage::Request(
+                big_endian_to_u32(&message_buf[1..5]),
+                big_endian_to_u32(&message_buf[5..9]),
+                big_endian_to_u32(&message_buf[9..]),
+            ),
+            7 => PeerMessage::Piece(
+                big_endian_to_u32(&message_buf[1..5]),
+                big_endian_to_u32(&message_buf[5..9]),
+                (&message_buf[9..]).to_vec(),
+            ),
+            8 => PeerMessage::Cancel(
+                big_endian_to_u32(&message_buf[1..5]),
+                big_endian_to_u32(&message_buf[5..9]),
+                big_endian_to_u32(&message_buf[9..]),
+            ),
+            9 => PeerMessage::Port(big_endian_to_u32(&message_buf[1..])),
             _ => {
                 panic!("Unknown message!");
             }
         }
-        None
     }
 
     fn request(
@@ -577,4 +600,31 @@ impl Peer {
             _ => unreachable!(),
         };
     }
+}
+/*
+    keep-alive: <len=0000>
+    choke: <len=0001><id=0>
+    unchoke: <len=0001><id=1>
+    interested: <len=0001><id=2>
+    not interested: <len=0001><id=3>
+    have: <len=0005><id=4><piece index>
+    bitfield: <len=0001+X><id=5><bitfield>
+    request: <len=0013><id=6><index><begin><length>
+    piece: <len=0009+X><id=7><index><begin><block>
+    cancel: <len=0013><id=8><index><begin><length>
+    port: <len=0003><id=9><listen-port>
+*/
+#[derive(Debug)]
+enum PeerMessage {
+    KeepAlive,
+    Choke,
+    Unchoke,
+    Interested,
+    NotInterested,
+    Have(u32),
+    Bitfield(Vec<u8>),
+    Request(u32, u32, u32),
+    Piece(u32, u32, Vec<u8>),
+    Cancel(u32, u32, u32),
+    Port(u32),
 }
