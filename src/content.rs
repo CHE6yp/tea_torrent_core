@@ -124,16 +124,10 @@ impl Content {
         // let pool = ThreadPool::new(9);
 
         let (tx, rx) = channel();
-
-        for piece in &mut self.pieces {
-            let tx = tx.clone();
-
-            // pool.execute(move || {
-            //     tx.send((p.lock().unwrap().number, p.lock().unwrap().check_hash(&read_buf)))
-            //         .expect("channel will be there waiting for the pool");
-            //     // check_hash_and_send(tx, &piece, &read_buf)
-            // });
-            thread::scope(|s| {
+        //TODO check, does this scope actually prevent multithreading?
+        thread::scope(|s| {
+            for piece in &mut self.pieces {
+                let tx = tx.clone();
                 s.spawn(move || {
                     let mut read_buf = Vec::with_capacity(piece.size as usize);
                     let offset = piece.offset;
@@ -160,8 +154,8 @@ impl Content {
                     tx.send((piece.number, piece.check_hash(&read_buf)))
                         .expect("channel will be there waiting for the pool");
                 });
-            });
-        }
+            }
+        });
 
         rx.iter()
             .take(self.pieces.len())
