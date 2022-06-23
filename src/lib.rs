@@ -1,5 +1,5 @@
 #![feature(scoped_threads)] //TODO this will stop being nightly soon
-use std::sync::mpsc::Sender;
+
 use bendy::decoding::FromBencode;
 use std::env;
 use std::fs;
@@ -21,9 +21,8 @@ use content::*;
 
 const BLOCK_SIZE: u32 = 16384;
 
-fn main() {
-    println!("\x1b]0;tTorrent\x07");
-    let args: Vec<String> = env::args().collect();
+pub fn run(args: Vec<String>) {
+    
     let x = fs::read(&args[1]).unwrap();
 
     let tf = TorrentFile::from_bencode(&x).unwrap();
