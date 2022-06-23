@@ -56,42 +56,48 @@ pub fn run(args: Vec<String>) {
                 let message = peer.get_message();
 
                 match message {
-                    PeerMessage::KeepAlive => (),
-                    PeerMessage::Choke => {
-                        println!("Choked by {}", peer.id_string());
-                        peer.status.lock().unwrap().2 = true;
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        panic!("Couldn't read buffer; {:?}", e.kind(),);
                     }
-                    PeerMessage::Unchoke => {
-                        println!("Unchoked by {}", peer.id_string());
-                        peer.status.lock().unwrap().2 = false;
-                        *peer.busy.lock().unwrap() = false;
-                    }
-                    PeerMessage::Interested => {
-                        println!("interested");
-                        peer.status.lock().unwrap().3 = true;
-                    }
-                    PeerMessage::NotInterested => {
-                        println!("not interested");
-                        peer.status.lock().unwrap().3 = false;
-                    }
-                    PeerMessage::Have(index) => {
-                        peer.add_piece_to_bitfield(index);
-                    }
-                    PeerMessage::Bitfield(field) => {
-                        *peer.bitfield.lock().unwrap() = field;
-                    }
-                    PeerMessage::Request(_index, _begin, _length) => {
-                        println!("request");
-                    }
-                    PeerMessage::Piece(index, begin, block) => {
-                        tx.send((Arc::clone(&peer), (index, begin, block))).unwrap();
-                    }
-                    PeerMessage::Cancel(_index, _begin, _length) => {
-                        println!("cancel");
-                    }
-                    PeerMessage::Port(_port) => {
-                        println!("port {}", peer.id_string());
-                    }
+                    Ok(message) => match message {
+                        PeerMessage::KeepAlive => (),
+                        PeerMessage::Choke => {
+                            println!("Choked by {}", peer.id_string());
+                            peer.status.lock().unwrap().2 = true;
+                        }
+                        PeerMessage::Unchoke => {
+                            println!("Unchoked by {}", peer.id_string());
+                            peer.status.lock().unwrap().2 = false;
+                            *peer.busy.lock().unwrap() = false;
+                        }
+                        PeerMessage::Interested => {
+                            println!("interested");
+                            peer.status.lock().unwrap().3 = true;
+                        }
+                        PeerMessage::NotInterested => {
+                            println!("not interested");
+                            peer.status.lock().unwrap().3 = false;
+                        }
+                        PeerMessage::Have(index) => {
+                            peer.add_piece_to_bitfield(index);
+                        }
+                        PeerMessage::Bitfield(field) => {
+                            *peer.bitfield.lock().unwrap() = field;
+                        }
+                        PeerMessage::Request(_index, _begin, _length) => {
+                            println!("request");
+                        }
+                        PeerMessage::Piece(index, begin, block) => {
+                            tx.send((Arc::clone(&peer), (index, begin, block))).unwrap();
+                        }
+                        PeerMessage::Cancel(_index, _begin, _length) => {
+                            println!("cancel");
+                        }
+                        PeerMessage::Port(_port) => {
+                            println!("port {}", peer.id_string());
+                        }
+                    },
                 }
             })
             .unwrap();
@@ -288,7 +294,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    fn get_message(&self) -> PeerMessage {
+    fn get_message(&self) -> Result<PeerMessage> {
         //self.stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
         let mut message_size = [0u8; 4];
         let mut stream = &self.stream;
@@ -301,11 +307,7 @@ impl Peer {
                 println!("Send keep-alive");
                 let r = stream.write(&[0, 0, 0, 0]);
                 match r {
-                    Err(e) if e.kind() == ErrorKind::Interrupted => {
-                        println!("\x1b[91mInterrupted\x1b[0m {}", self.id_string());
-                        // return None; TODO
-                        return PeerMessage::KeepAlive;
-                    }
+                    Err(e) if e.kind() == ErrorKind::Interrupted => return Err(e),
                     Err(e) if e.kind() == ErrorKind::ConnectionReset => {
                         println!("\x1b[91mConnection Reset\x1b[0m {}", self.id_string());
                         panic!("{:?}", e.kind());
@@ -315,25 +317,18 @@ impl Peer {
                         panic!("{:?}", e.kind());
                     }
                     Err(e) => println!("Error writing buffer: {:?}", e),
-                    _ => {}
+                    _ => (),
                 }
             }
         }
         let message_size = big_endian_to_u32(message_size.as_ref());
         if message_size == 0 {
             // println!("Got keep alive");
-            return PeerMessage::KeepAlive;
+            return Ok(PeerMessage::KeepAlive);
         }
 
         let mut message_buf = vec![0u8; message_size as usize];
-        let r = stream.read_exact(&mut message_buf);
-        if let Err(e) = r {
-            panic!(
-                "Couldn't read buffer; {:?}\n message_size {} ",
-                e.kind(),
-                message_size
-            );
-        }
+        stream.read_exact(&mut message_buf)?;
         /*
             keep-alive: <len=0000>
             choke: <len=0001><id=0>
@@ -347,7 +342,7 @@ impl Peer {
             cancel: <len=0013><id=8><index><begin><length>
             port: <len=0003><id=9><listen-port>
         */
-        match &message_buf[0] {
+        let message = match &message_buf[0] {
             0 => PeerMessage::Choke,
             1 => PeerMessage::Unchoke,
             2 => PeerMessage::Interested,
@@ -373,7 +368,8 @@ impl Peer {
             _ => {
                 panic!("Unknown message!");
             }
-        }
+        };
+        Ok(message)
     }
 
     fn request(
