@@ -270,19 +270,6 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
     streams
 }
 
-//TODO there is a std function u32::from_be_bytes, better use that
-//but it does want an array of 4
-fn big_endian_to_u32(value: &[u8]) -> u32 {
-    let length = value.len();
-    let mut result = 0;
-    let mut i = 0;
-    while i < 4 && i < length {
-        result += (value[length - (i + 1)] as u32) << i * 8;
-        i += 1;
-    }
-    result
-}
-
 #[derive(Debug)]
 pub struct Peer {
     id: [u8; 20],
@@ -295,12 +282,11 @@ pub struct Peer {
 
 impl Peer {
     fn get_message(&self) -> Result<PeerMessage> {
-        //self.stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
         let mut message_size = [0u8; 4];
         let mut stream = &self.stream;
         let package_size = stream.read_exact(&mut message_size);
         match package_size {
-            Ok(_package_size) => {} //println!("package_size {}", package_size),
+            Ok(_package_size) => {}
             Err(e) => {
                 println!("No package for some secs; read timeout; {}", e);
 
@@ -321,9 +307,8 @@ impl Peer {
                 }
             }
         }
-        let message_size = big_endian_to_u32(message_size.as_ref());
+        let message_size = u32::from_be_bytes(message_size);
         if message_size == 0 {
-            // println!("Got keep alive");
             return Ok(PeerMessage::KeepAlive);
         }
 
@@ -347,24 +332,24 @@ impl Peer {
             1 => PeerMessage::Unchoke,
             2 => PeerMessage::Interested,
             3 => PeerMessage::NotInterested,
-            4 => PeerMessage::Have(big_endian_to_u32(&message_buf[1..])),
+            4 => PeerMessage::Have(u32::from_be_bytes(message_buf[1..5].try_into().unwrap())),
             5 => PeerMessage::Bitfield((&message_buf[1..]).to_vec()),
             6 => PeerMessage::Request(
-                big_endian_to_u32(&message_buf[1..5]),
-                big_endian_to_u32(&message_buf[5..9]),
-                big_endian_to_u32(&message_buf[9..]),
+                u32::from_be_bytes(message_buf[1..5].try_into().unwrap()),
+                u32::from_be_bytes(message_buf[5..9].try_into().unwrap()),
+                u32::from_be_bytes(message_buf[9..].try_into().unwrap()),
             ),
             7 => PeerMessage::Piece(
-                big_endian_to_u32(&message_buf[1..5]),
-                big_endian_to_u32(&message_buf[5..9]),
+                u32::from_be_bytes(message_buf[1..5].try_into().unwrap()),
+                u32::from_be_bytes(message_buf[5..9].try_into().unwrap()),
                 (&message_buf[9..]).to_vec(),
             ),
             8 => PeerMessage::Cancel(
-                big_endian_to_u32(&message_buf[1..5]),
-                big_endian_to_u32(&message_buf[5..9]),
-                big_endian_to_u32(&message_buf[9..]),
+                u32::from_be_bytes(message_buf[1..5].try_into().unwrap()),
+                u32::from_be_bytes(message_buf[5..9].try_into().unwrap()),
+                u32::from_be_bytes(message_buf[9..13].try_into().unwrap()),
             ),
-            9 => PeerMessage::Port(big_endian_to_u32(&message_buf[1..])),
+            9 => PeerMessage::Port(u32::from_be_bytes(message_buf[1..5].try_into().unwrap())),
             _ => {
                 panic!("Unknown message!");
             }
@@ -380,7 +365,6 @@ impl Peer {
     ) -> Result<bool> {
         if let Ok(mut st) = self.status.lock() {
             if !st.1 && st.2 {
-                // if !(self.status.lock().unwrap().1) && self.status.lock().unwrap().2 {
                 println!("Sending unchoke and interested");
                 //send unchoke and interested
                 let r = stream.write(&[0, 0, 0, 1, 1, 0, 0, 0, 1, 2]);
