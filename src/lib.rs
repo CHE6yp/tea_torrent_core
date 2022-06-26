@@ -28,7 +28,7 @@ pub fn run(args: Vec<String>) {
     println!("{}", tf);
     println!();
 
-    let mut content = Content::new(&tf);
+    let content = Arc::new(Content::new(&tf));
     content.preallocate();
     content.check_content_hash();
     println!("{:?}", content.get_bitfield());
@@ -108,13 +108,15 @@ pub fn run(args: Vec<String>) {
 
     let tf = Arc::new(tf);
     //recieving blocks and writing them to pieces (and then to file)
-    let mut content_piece = content.clone();
+    // let mut content = content.clone();
+    let content_write = Arc::clone(&content);
     handles.push(thread::spawn(move || {
         rx.iter().for_each(|(peer, (index, begin, block))| {
             let piece_number = index;
             let offset = begin;
 
-            let r = &content_piece.add_block(piece_number as usize, offset as usize, &block);
+            //TODO need to find a way to make peer not busy before writing the piece to file.
+            let r = content_write.add_block(piece_number as usize, offset as usize, &block);
             match r {
                 Some(true) => {
                     println!(
@@ -139,16 +141,26 @@ pub fn run(args: Vec<String>) {
     }));
 
     //sending messages to peers
-    let mut missing_pieces = content.missing_pieces.iter();
-    let mut piece = missing_pieces.next();
+    // let mut missing_pieces = content.missing_pieces.iter();
+    // let mut piece = missing_pieces.next();
 
-    while piece != None {
-        let p = piece.unwrap();
+    loop {
+        let piece_o = content
+            .pieces
+            .iter()
+            .filter(|piece| piece.lock().unwrap().status == PieceStatus::Missing)
+            .next();
+        let &mut piece;
+        match piece_o {
+            Some(p) => piece = p,
+            None => continue,
+        }
+        let p = piece.lock().unwrap().number;
 
         let peersclone = peers.clone();
         let peersclone = peersclone
             .into_iter()
-            .filter(|peer| peer.has_piece(*p) && !(*peer.busy.lock().unwrap()))
+            .filter(|peer| peer.has_piece(p.try_into().unwrap()) && !(*peer.busy.lock().unwrap()))
             .collect::<Vec<Arc<Peer>>>();
         let peer = peersclone.first();
 
@@ -158,15 +170,15 @@ pub fn run(args: Vec<String>) {
 
         let peer = Arc::clone(peer.unwrap());
 
-        let piece_length = if *p == tf.info.piece_count as usize - 1 {
+        let piece_length = if p == tf.info.piece_count - 1 {
             //last piece
-            tf.info.length as u32 - (tf.info.piece_length as u32 * (*p as u32))
+            tf.info.length as u32 - (tf.info.piece_length as u32 * p)
         } else {
             tf.info.piece_length
         };
-        let res = peer.request(&peer.stream, *p as u32, piece_length);
+        let res = peer.request(&peer.stream, p as u32, piece_length);
         match res {
-            Ok(true) => piece = missing_pieces.next(),
+            Ok(true) => piece.lock().unwrap().make_awaiting(),
             Ok(false) => (),
             Err(_e) => {
                 println!("\x1b[91mRemoving peer {} \x1b[0m", peer.id_string());
@@ -175,11 +187,11 @@ pub fn run(args: Vec<String>) {
             }
         }
     }
-    println!("missing_pieces DONE!");
+    //println!("missing_pieces DONE!");
 
-    for handle in handles {
-        let _r = handle.join();
-    }
+    // for handle in handles {
+    //     let _r = handle.join();
+    // }
 }
 
 fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>> {

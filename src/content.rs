@@ -3,25 +3,21 @@ use crate::BLOCK_SIZE;
 use fs::OpenOptions;
 use sha1::Digest;
 use sha1::Sha1;
-use std::path::PathBuf;
-
 use std::fs;
-use std::io::stdout;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
-use std::sync::mpsc::channel;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::thread;
 use tf::TorrentFile;
 // use threadpool::ThreadPool;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Content {
-    pieces: Vec<Piece>,
+    pub pieces: Vec<Mutex<Piece>>,
     files: Vec<(PathBuf, usize)>,
-    pub missing_pieces: Vec<usize>,
-    available_pieces: Vec<usize>,
     pub destination_path: String,
 }
 
@@ -60,13 +56,13 @@ impl Content {
                 .get_piece_hash(piece_number as usize)
                 .try_into()
                 .unwrap();
-            pieces.push(Piece::new(
+            pieces.push(Mutex::new(Piece::new(
                 piece_number,
                 tf.info.piece_length,
                 offset,
                 piece_files,
                 hash,
-            ));
+            )));
         }
         //last piece is probably a different size
         let (offset, piece_files) = Content::get_piece_files(
@@ -80,19 +76,17 @@ impl Content {
             .get_piece_hash((tf.info.piece_count - 1) as usize)
             .try_into()
             .unwrap();
-        pieces.push(Piece::new(
+        pieces.push(Mutex::new(Piece::new(
             tf.info.piece_count - 1,
             tf.info.get_last_piece_size(),
             offset,
             piece_files,
             hash,
-        ));
+        )));
 
         Content {
             pieces,
             files,
-            missing_pieces: vec![],
-            available_pieces: vec![],
             destination_path: "downloads".to_string(),
         }
     }
@@ -115,21 +109,18 @@ impl Content {
         println!("Preallocation complete");
     }
 
-    pub fn check_content_hash(&mut self) {
+    pub fn check_content_hash(&self) {
         println!("Checking files hash");
-        let mut missing_pieces = vec![];
-        let mut available_pieces = vec![];
 
         //todo maybe return this threadPool?
         // let pool = ThreadPool::new(9);
 
-        let (tx, rx) = channel();
-        //TODO check, does this scope actually prevent multithreading?
         thread::scope(|s| {
-            for piece in &mut self.pieces {
-                let tx = tx.clone();
-                s.spawn(move || {
-                    let mut read_buf = Vec::with_capacity(piece.size as usize);
+            let mut handles = vec![];
+            for piece in &self.pieces {
+                let h = s.spawn(move || {
+                    let mut read_buf = Vec::with_capacity(piece.lock().unwrap().size as usize);
+                    let mut piece = piece.lock().unwrap();
                     let offset = piece.offset;
                     let files = &piece.files;
 
@@ -151,33 +142,35 @@ impl Content {
                             .read_to_end(&mut read_buf)
                             .unwrap();
                     }
-                    tx.send((piece.number, piece.check_hash(&read_buf)))
-                        .expect("channel will be there waiting for the pool");
+                    piece.check_hash(&read_buf);
                 });
+                handles.push(h);
+            }
+            for handle in handles {
+                let _r = handle.join();
             }
         });
 
-        rx.iter()
-            .take(self.pieces.len())
-            .for_each(|(piece_number, hash_correct)| {
-                if !hash_correct {
+        for piece in &self.pieces {
+            match piece.lock().unwrap().status {
+                PieceStatus::Missing => {
                     print!("\x1b[91m");
-                    missing_pieces.push(piece_number as usize);
-                } else {
-                    available_pieces.push(piece_number as usize);
+                }
+                PieceStatus::Available => {
                     print!("\x1b[92m");
                 }
-                print!("{} ", piece_number);
-                stdout().flush().unwrap();
-            });
-
+                PieceStatus::Awaiting(_) => unreachable!(),
+            }
+            print!("{} ", piece.lock().unwrap().number);
+        }
         println!("\x1b[0m");
-        self.missing_pieces = missing_pieces;
-        self.available_pieces = available_pieces;
     }
 
-    pub fn add_block(&mut self, piece_number: usize, offset: usize, block: &[u8]) -> Option<bool> {
-        self.pieces[piece_number].add_block(offset, block)
+    pub fn add_block(&self, piece_number: usize, offset: usize, block: &[u8]) -> Option<bool> {
+        self.pieces[piece_number]
+            .lock()
+            .unwrap()
+            .add_block(offset, block)
     }
 
     pub fn get_piece_files(
@@ -219,7 +212,7 @@ impl Content {
         let mut field = vec![0u8; size];
 
         for (i, piece) in self.pieces.iter().enumerate() {
-            if piece.status != PieceStatus::Available {
+            if piece.lock().unwrap().status != PieceStatus::Available {
                 continue;
             }
             field[i / 8] += (128 / 2u32.pow(i as u32 % 8)) as u8;
@@ -229,12 +222,12 @@ impl Content {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Piece {
-    number: u32,
+#[derive(Debug, Clone, PartialEq)]
+pub struct Piece {
+    pub number: u32,
     size: u32,
     offset: usize,
-    status: PieceStatus,
+    pub status: PieceStatus,
     hash: [u8; 20],
     //TODO
     //make files a slice, I DARE YOU
@@ -303,7 +296,6 @@ impl Piece {
             let mut offset = self.offset;
 
             if !self.check_hash(&buffer) {
-                self.status = PieceStatus::Missing;
                 return false;
             }
 
@@ -330,7 +322,6 @@ impl Piece {
                     }
                 }
             }
-            self.status = PieceStatus::Available;
             true
         } else {
             panic!("Trying to write a piece with no buffer");
@@ -342,17 +333,25 @@ impl Piece {
         hasher.update(buffer);
         let hexes = hasher.finalize();
         let hexes: [u8; 20] = hexes.try_into().expect("Wrong length checking hash");
-        self.status = if hexes == self.hash {
-            PieceStatus::Available
+        if hexes == self.hash {
+            self.status = PieceStatus::Available;
         } else {
-            PieceStatus::Missing
+            self.status = PieceStatus::Missing;
+            self.block_count = 0;
         };
         hexes == self.hash
+    }
+
+    pub fn make_awaiting(&mut self) {
+        if self.status != PieceStatus::Missing {
+            return;
+        };
+        self.status = PieceStatus::Awaiting(vec![0u8; self.size.try_into().unwrap()]);
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum PieceStatus {
+pub enum PieceStatus {
     Missing,
     Available,
     Awaiting(Vec<u8>),
