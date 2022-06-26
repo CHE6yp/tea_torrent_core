@@ -31,6 +31,7 @@ pub fn run(args: Vec<String>) {
     let mut content = Content::new(&tf);
     content.preallocate();
     content.check_content_hash();
+    println!("{:?}", content.get_bitfield());
 
     let r = connect_to_tracker(&tf, false);
     if r.is_none() {
@@ -106,7 +107,7 @@ pub fn run(args: Vec<String>) {
     }
 
     let tf = Arc::new(tf);
-    //revieving blocks and writing them to pieces (and then to file)
+    //recieving blocks and writing them to pieces (and then to file)
     let mut content_piece = content.clone();
     handles.push(thread::spawn(move || {
         rx.iter().for_each(|(peer, (index, begin, block))| {

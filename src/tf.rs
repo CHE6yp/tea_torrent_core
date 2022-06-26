@@ -2,6 +2,7 @@ use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
 use bendy::encoding::{AsString, Error as EncodeError, SingleItemEncoder, ToBencode};
 use sha1::{Digest, Sha1};
 use std::fmt;
+use std::fmt::Write;
 
 #[derive(Debug, Clone)]
 pub struct TorrentFile {
@@ -267,7 +268,7 @@ impl fmt::Display for Info {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut files = String::new();
         for f in &self.files {
-            files += &format!(" - {} \x1b[1m{}\x1b[0m\n", f.path, f.length)
+            let _ = writeln!(files, " - {} \x1b[1m{}\x1b[0m", f.path, f.length);
         }
         write!(
             f,
@@ -299,7 +300,7 @@ impl InfoHash {
     pub fn as_string(&self) -> String {
         let mut hash = String::new();
         for i in 0..20 {
-            hash += &format!("{:02X}", &self.hash[i]);
+            let _ = write!(hash, "{:02X}", &self.hash[i]);
         }
         hash
     }
@@ -307,7 +308,7 @@ impl InfoHash {
     pub fn as_string_url_encoded(&self) -> String {
         let mut hash = String::new();
         for i in 0..20 {
-            hash += &format!("%{:02X}", &self.hash[i]);
+            let _ = write!(hash, "%{:02X}", &self.hash[i]);
         }
         hash
     }

@@ -89,7 +89,7 @@ impl Content {
         ));
 
         Content {
-            pieces: pieces,
+            pieces,
             files,
             missing_pieces: vec![],
             available_pieces: vec![],
@@ -201,8 +201,8 @@ impl Content {
             }
         }
         l = 0;
-        for fnum in 0..files.len() {
-            l += files[fnum].1;
+        for (fnum, item) in files.iter().enumerate() {
+            l += item.1;
             if piece * piece_length <= l {
                 first_file = fnum;
                 break;
@@ -212,6 +212,20 @@ impl Content {
         let first_offset = files[first_file].1 - (l - (piece * piece_length));
         let files = &files[first_file..=last_file];
         (first_offset, files.to_vec())
+    }
+
+    pub fn get_bitfield(&self) -> Vec<u8> {
+        let size = self.pieces.len() / 8 + if self.pieces.len() % 8 == 0 { 0 } else { 1 };
+        let mut field = vec![0u8; size];
+
+        for (i, piece) in self.pieces.iter().enumerate() {
+            if piece.status != PieceStatus::Available {
+                continue;
+            }
+            field[i / 8] += (128 / 2u32.pow(i as u32 % 8)) as u8;
+        }
+
+        field
     }
 }
 
@@ -273,7 +287,7 @@ impl Piece {
             PieceStatus::Available => panic!("This piece is already available"),
         };
 
-        let new_buf = [&buf[..offset], &block, &buf[offset + block.len()..]].concat();
+        let new_buf = [&buf[..offset], block, &buf[offset + block.len()..]].concat();
 
         self.status = PieceStatus::Awaiting(new_buf);
 
@@ -337,7 +351,7 @@ impl Piece {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum PieceStatus {
     Missing,
     Available,
