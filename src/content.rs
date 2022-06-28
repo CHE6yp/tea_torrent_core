@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 use tf::TorrentFile;
+use dirs;
 // use threadpool::ThreadPool;
 
 #[derive(Debug)]
@@ -23,9 +24,10 @@ pub struct Content {
 
 impl Content {
     pub fn new(tf: &TorrentFile) -> Content {
+        let dir_path_string = dirs::download_dir().unwrap().into_os_string().into_string().unwrap();
         let file_path = format!(
             "{}/{}",
-            "downloads",
+            dir_path_string,
             if tf.info.files.len() > 1 {
                 &tf.info.name
             } else {
@@ -87,7 +89,7 @@ impl Content {
         Content {
             pieces,
             files,
-            destination_path: "downloads".to_string(),
+            destination_path: dir_path_string,
         }
     }
 
