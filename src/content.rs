@@ -65,6 +65,7 @@ impl Content {
             pieces.push(Mutex::new(Piece::new(
                 piece_number,
                 tf.info.piece_length,
+                tf.info.piece_length / BLOCK_SIZE,
                 offset,
                 piece_files,
                 hash,
@@ -82,9 +83,20 @@ impl Content {
             .get_piece_hash((tf.info.piece_count - 1) as usize)
             .try_into()
             .unwrap();
+        //because it's size is unconvential, smaller blocks are needed
+        let last_piece_size = tf.info.get_last_piece_size();
+        let mut remainder = last_piece_size % BLOCK_SIZE;
+        let mut smaller_blocks = 0;
+        while remainder != 0 {
+            remainder = remainder & (remainder - 1);
+            smaller_blocks += 1;
+        }
+        let block_count_goal = last_piece_size / BLOCK_SIZE + smaller_blocks;
+
         pieces.push(Mutex::new(Piece::new(
             tf.info.piece_count - 1,
-            tf.info.get_last_piece_size(),
+            last_piece_size,
+            block_count_goal,
             offset,
             piece_files,
             hash,
@@ -249,22 +261,11 @@ impl Piece {
     fn new(
         number: u32,
         size: u32,
+        block_count_goal: u32,
         offset: usize,
         files: Vec<(PathBuf, usize)>,
         hash: [u8; 20],
     ) -> Piece {
-        /*
-            TODO smaller blocks are only in the last piece
-            maybe i need to get this out of constructor?
-        */
-        let mut remainder = size % BLOCK_SIZE;
-        let mut smaller_blocks = 0;
-        while remainder != 0 {
-            remainder = remainder & (remainder - 1);
-            smaller_blocks += 1;
-        }
-        let block_count_goal = size / BLOCK_SIZE + smaller_blocks;
-
         Piece {
             number,
             size,

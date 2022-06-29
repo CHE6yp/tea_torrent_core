@@ -122,6 +122,9 @@ pub fn run(args: Vec<String>) {
             let offset = begin;
 
             //TODO need to find a way to make peer not busy before writing the piece to file.
+            //my theory is we will be able to download and write at the same time then
+            //and this thread will make sense.
+            //It will probably take more RAM though
             let r = content_write.add_block(piece_number as usize, offset as usize, &block);
             match r {
                 Some(true) => {
