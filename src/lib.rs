@@ -1,7 +1,9 @@
 #![feature(scoped_threads)] //TODO this will stop being nightly soon
 
 use bendy::decoding::FromBencode;
+use rand::Rng;
 
+use rand;
 use std::fs;
 use std::io::{stdout, ErrorKind, Read, Result, Write};
 use std::net::TcpStream;
@@ -42,7 +44,11 @@ pub fn run(args: Vec<String>) {
     let respone = r.unwrap();
     println!("Connection complete, connecting to peers");
 
-    let mut peers = connect_to_peers(respone, &tf);
+    let mut peers = connect_to_peers(
+        respone,
+        Handshake::new(&tf.info_hash.raw()),
+        tf.info.piece_count as usize,
+    );
     let mut handles: Vec<thread::JoinHandle<_>> = vec![];
 
     let (tx, rx) = channel();
@@ -194,7 +200,11 @@ pub fn run(args: Vec<String>) {
     // }
 }
 
-fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>> {
+fn connect_to_peers(
+    respone: TrackerResponse,
+    handshake: Handshake,
+    piece_count: usize,
+) -> Vec<Arc<Peer>> {
     let mut streams = vec![];
     let pool = ThreadPool::new(9);
     let (tx, rx) = channel();
@@ -206,15 +216,9 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
         InvalidHash,
     }
 
-    //TODO look into arcing this instead if cloning
-    //maybe i need scoped threads?
-    let mut info_hash = [0; 20];
-    info_hash.clone_from_slice(tf.info_hash.raw());
-
     for i in 0..respone.peers.len() {
         let respone = Arc::clone(&respone);
         let tx = tx.clone();
-        let piece_count = tf.info.piece_count;
 
         pool.execute(move || {
             stdout().flush().unwrap();
@@ -222,35 +226,32 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
 
             if let Ok(mut s) = stream {
                 //s.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-                //writing handhsake
-                let mut arr = vec![19];
-                arr.extend(b"BitTorrent protocol");
-                arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
-                arr.extend(info_hash);
-                arr.extend(b"-tT0001-004815162342"); //12 rand numbers at the end TODO
-                let _r = s.write(&arr).expect("Couldn't write buffer; Handshake");
+                //writing handshake
+                let _r = s
+                    .write(&handshake.raw)
+                    .expect("Couldn't write buffer; Handshake");
                 //reading handshake
-                let mut handshake_buff = [0u8; 68];
-                let _r = s.read_exact(&mut handshake_buff);
+                let mut peer_handshake = [0u8; 68];
+                let _r = s.read_exact(&mut peer_handshake);
 
                 if let Err(_e) = _r {
                     tx.send((Result::Error, respone.peers[i]))
                         .expect("channel will be there waiting for the pool");
                     return;
                 }
-                if handshake_buff[28..48] != info_hash {
+                if peer_handshake[28..48] != handshake.raw[28..48] {
                     tx.send((Result::InvalidHash, respone.peers[i]))
                         .expect("channel will be there waiting for the pool");
                     return;
                 }
                 let mut peer_id = [0; 20];
-                peer_id.clone_from_slice(&handshake_buff[48..68]);
+                peer_id.clone_from_slice(&peer_handshake[48..68]);
                 // s.set_nonblocking(true);
                 tx.send((
                     Result::Done(Peer {
                         id: peer_id,
                         stream: s,
-                        bitfield: Mutex::new(vec![0; piece_count as usize]),
+                        bitfield: Mutex::new(vec![0; piece_count]),
                         status: Mutex::new((true, false, true, false)),
                         busy: Mutex::new(false),
                     }),
@@ -281,6 +282,29 @@ fn connect_to_peers(respone: TrackerResponse, tf: &TorrentFile) -> Vec<Arc<Peer>
         }
     });
     streams
+}
+
+#[derive(Debug)]
+struct Handshake {
+    raw: [u8; 68],
+}
+
+impl Handshake {
+    fn new(info_hash: &[u8; 20]) -> Handshake {
+        let mut arr = vec![19];
+        arr.extend(b"BitTorrent protocol");
+        arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
+        arr.extend(info_hash);
+        arr.extend(b"-tT0030-");
+        let random_id: [u8; 12] = (0..12)
+            .map(|_| rand::thread_rng().gen_range(48..58))
+            .collect::<Vec<u8>>()
+            .try_into()
+            .unwrap();
+        arr.extend(&random_id);
+        let raw = arr.try_into().unwrap();
+        Handshake { raw }
+    }
 }
 
 #[derive(Debug)]

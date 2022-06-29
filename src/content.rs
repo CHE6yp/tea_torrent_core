@@ -1,5 +1,6 @@
 use crate::tf;
 use crate::BLOCK_SIZE;
+use dirs;
 use fs::OpenOptions;
 use sha1::Digest;
 use sha1::Sha1;
@@ -12,7 +13,6 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 use tf::TorrentFile;
-use dirs;
 // use threadpool::ThreadPool;
 
 #[derive(Debug)]
@@ -24,7 +24,11 @@ pub struct Content {
 
 impl Content {
     pub fn new(tf: &TorrentFile) -> Content {
-        let dir_path_string = dirs::download_dir().unwrap().into_os_string().into_string().unwrap();
+        let dir_path_string = dirs::download_dir()
+            .unwrap()
+            .into_os_string()
+            .into_string()
+            .unwrap();
         let file_path = format!(
             "{}/{}",
             dir_path_string,

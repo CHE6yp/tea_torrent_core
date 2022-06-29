@@ -293,7 +293,7 @@ impl InfoHash {
         }
     }
 
-    pub fn raw(&self) -> &[u8] {
+    pub fn raw(&self) -> &[u8; 20] {
         &self.hash
     }
 

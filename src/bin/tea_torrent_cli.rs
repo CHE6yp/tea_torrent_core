@@ -1,4 +1,4 @@
-use t_torrent::run;
+use tea_torrent::run;
 
 fn main() {
     println!("\x1b]0;tTorrent\x07");
