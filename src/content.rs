@@ -262,7 +262,7 @@ pub struct ContentEvents {
 }
 
 impl ContentEvents {
-    fn new() -> ContentEvents {
+    pub fn new() -> ContentEvents {
         ContentEvents {
             preallocaion_start: vec![],
             preallocaion_end: vec![],
