@@ -18,7 +18,7 @@ mod tf;
 use crate::tf::*;
 mod tracker;
 use crate::tracker::*;
-mod content;
+pub mod content;
 use content::*;
 
 const BLOCK_SIZE: u32 = 16384;
