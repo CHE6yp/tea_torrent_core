@@ -82,10 +82,14 @@ pub fn connect_to_tracker(
             .set("Content-Type", "application/octet-stream")
             .call()
     };
-    let to_tracker_response = |resp: Response| -> Result<TrackerResponse, DecodeError> {
+    let to_tracker_response = |resp: Response| -> Result<TrackerResponse, DecodeErrorWrapper> {
         let mut bytes: Vec<u8> = Vec::new();
         resp.into_reader().read_to_end(&mut bytes)?;
-        TrackerResponse::from_bencode(&bytes)
+        let tr = TrackerResponse::from_bencode(&bytes);
+        match tr {
+            Ok(tr) => Ok(tr),
+            Err(e) => Err(DecodeErrorWrapper { derr: e }),
+        }
     };
 
     let mut result;
@@ -101,7 +105,7 @@ pub fn connect_to_tracker(
                 match result {
                     Ok(r) => match to_tracker_response(r) {
                         Ok(r) => return Some(r),
-                        Err(e) => println!("{}", e),
+                        Err(e) => println!("{}", e.unwrap()),
                     },
                     Err(Error::Status(code, response)) => {
                         println!(
@@ -125,7 +129,7 @@ pub fn connect_to_tracker(
         match result {
             Ok(r) => match to_tracker_response(r) {
                 Ok(r) => return Some(r),
-                Err(e) => println!("{}", e),
+                Err(e) => println!("{}", e.unwrap()),
             },
             Err(Error::Status(code, response)) => {
                 println!(
@@ -147,7 +151,7 @@ pub fn connect_to_tracker(
             match result {
                 Ok(r) => match to_tracker_response(r) {
                     Ok(r) => return Some(r),
-                    Err(e) => println!("{}", e),
+                    Err(e) => println!("{}", e.unwrap()),
                 },
                 Err(Error::Status(code, response)) => {
                     println!(
@@ -195,4 +199,27 @@ fn backup_trackers() -> [String; 25] {
         "https://chihaya-heroku.120181311.xyz:443/announce".to_string(),
         "https://opentracker.i2p.rocks:443/announce".to_string(),
     ]
+}
+
+/*
+    Why the hell bendy removed
+        impl<T: StdError + Send + Sync + 'static> From<T> for Error
+    I don't know, but now I have to write this ugly piece of code
+*/
+#[derive(Debug)]
+struct DecodeErrorWrapper {
+    derr: DecodeError,
+}
+
+impl<T: std::error::Error + Send + Sync + 'static> From<T> for DecodeErrorWrapper {
+    fn from(error: T) -> Self {
+        let derr = DecodeError::malformed_content(error);
+        DecodeErrorWrapper { derr }
+    }
+}
+
+impl DecodeErrorWrapper {
+    fn unwrap(self) -> DecodeError {
+        self.derr
+    }
 }
