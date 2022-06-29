@@ -23,12 +23,15 @@ pub struct Content {
 }
 
 impl Content {
-    pub fn new(tf: &TorrentFile) -> Content {
-        let dir_path_string = dirs::download_dir()
-            .unwrap()
-            .into_os_string()
-            .into_string()
-            .unwrap();
+    pub fn new(tf: &TorrentFile, dir_path_string: Option<String>) -> Content {
+        let dir_path_string = match dir_path_string {
+            Some(path) => path,
+            None => dirs::download_dir()
+                .unwrap()
+                .into_os_string()
+                .into_string()
+                .unwrap(),
+        };
         let file_path = format!(
             "{}/{}",
             dir_path_string,

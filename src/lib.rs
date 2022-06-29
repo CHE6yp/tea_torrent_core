@@ -23,14 +23,13 @@ use content::*;
 
 const BLOCK_SIZE: u32 = 16384;
 
-pub fn run(args: Vec<String>) {
-    let x = fs::read(&args[1]).unwrap();
-
-    let tf = TorrentFile::from_bencode(&x).unwrap();
+pub fn run(torrent_file_path: String, download_folder: Option<String>) {
+    let tf_raw = fs::read(&torrent_file_path).unwrap();
+    let tf = TorrentFile::from_bencode(&tf_raw).unwrap();
     println!("{}", tf);
     println!();
 
-    let content = Arc::new(Content::new(&tf));
+    let content = Arc::new(Content::new(&tf, download_folder));
     content.preallocate();
     content.check_content_hash();
     println!("{:?}", content.get_bitfield());
