@@ -20,6 +20,7 @@ pub struct Content {
     pub pieces: Vec<Mutex<Piece>>,
     files: Vec<(PathBuf, usize)>,
     pub destination_path: String,
+    pub events: ContentEvents,
 }
 
 impl Content {
@@ -109,6 +110,7 @@ impl Content {
             pieces,
             files,
             destination_path: dir_path_string,
+            events: ContentEvents::new(),
         }
     }
 
@@ -128,6 +130,10 @@ impl Content {
             f.set_len(file.1 as u64).unwrap();
         }
         println!("Preallocation complete");
+        self.events
+            .preallocaion_end
+            .iter()
+            .for_each(|e| e(self.files.len() as u32));
     }
 
     pub fn check_content_hash(&self) {
@@ -171,13 +177,14 @@ impl Content {
                 let _r = handle.join();
             }
         });
-
+        let mut has = 0;
         for piece in &self.pieces {
             match piece.lock().unwrap().status {
                 PieceStatus::Missing => {
                     print!("\x1b[91m");
                 }
                 PieceStatus::Available => {
+                    has = has + 1;
                     print!("\x1b[92m");
                 }
                 PieceStatus::Awaiting(_) => unreachable!(),
@@ -185,6 +192,10 @@ impl Content {
             print!("{} ", piece.lock().unwrap().number);
         }
         println!("\x1b[0m");
+        self.events
+            .hash_checked
+            .iter()
+            .for_each(|e| e(has, self.pieces.len() as u32));
     }
 
     pub fn add_block(&self, piece_number: usize, offset: usize, block: &[u8]) -> Option<bool> {
@@ -240,6 +251,34 @@ impl Content {
         }
 
         field
+    }
+}
+
+// #[derive(Debug)]
+pub struct ContentEvents {
+    pub preallocaion_start: Vec<Box<dyn Fn(u32) + 'static + Send + Sync>>,
+    pub preallocaion_end: Vec<Box<dyn Fn(u32) + 'static + Send + Sync>>,
+    pub hash_checked: Vec<Box<dyn Fn(u32, u32) + 'static + Send + Sync>>,
+}
+
+impl ContentEvents {
+    fn new() -> ContentEvents {
+        ContentEvents {
+            preallocaion_start: vec![],
+            preallocaion_end: vec![],
+            hash_checked: vec![],
+        }
+    }
+}
+
+impl std::fmt::Debug for ContentEvents {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?}{:?}",
+            self.preallocaion_start.len(),
+            self.preallocaion_end.len()
+        )
     }
 }
 

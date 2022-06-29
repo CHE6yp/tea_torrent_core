@@ -23,13 +23,30 @@ use content::*;
 
 const BLOCK_SIZE: u32 = 16384;
 
-pub fn run(torrent_file_path: String, download_folder: Option<String>) {
+// fn name(arg: u32) {
+//     println!("ASSSSA {}", arg);
+// }
+
+pub fn run(
+    torrent_file_path: String,
+    download_folder: Option<String>,
+    content_events: Option<ContentEvents>,
+) {
     let tf_raw = fs::read(&torrent_file_path).unwrap();
     let tf = TorrentFile::from_bencode(&tf_raw).unwrap();
     println!("{}", tf);
     println!();
 
-    let content = Arc::new(Content::new(&tf, download_folder));
+    let mut content = Content::new(&tf, download_folder);
+
+    // content.events.preallocaion_end.push(Box::new(name));
+    // content.events.hash_checked.push(Box::new(|x,y| { println!("{:?}/{}",x,y );}));
+    // content.events.hash_checked.push(Box::new(|x,y| { println!("Have {} out of {}",x,y );}));
+    if content_events.is_some() {
+        content.events = content_events.unwrap();
+    }
+
+    let content = Arc::new(content);
     content.preallocate();
     content.check_content_hash();
     println!("{:?}", content.get_bitfield());
