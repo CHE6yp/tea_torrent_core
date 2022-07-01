@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::tf;
 use crate::BLOCK_SIZE;
 use dirs;
@@ -15,7 +16,7 @@ use std::thread;
 use tf::TorrentFile;
 // use threadpool::ThreadPool;
 
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct Content {
     pub pieces: Vec<Mutex<Piece>>,
     files: Vec<(PathBuf, usize)>,
@@ -33,6 +34,7 @@ impl Content {
                 .into_string()
                 .unwrap(),
         };
+
         let file_path = format!(
             "{}/{}",
             dir_path_string,
@@ -42,8 +44,15 @@ impl Content {
                 ""
             }
         );
+        let mut content = Content {
+            pieces: vec![],
+            files: vec![],
+            destination_path: dir_path_string,
+            events: ContentEvents::new(),
+        };
         //I think im converting tfFile to content File here
-        let files: Vec<(PathBuf, usize)> = tf
+        // content.files: Vec<(PathBuf, usize)> = tf
+        content.files = tf
             .info
             .files
             .iter()
@@ -53,11 +62,11 @@ impl Content {
             })
             .collect();
 
-        let mut pieces = vec![];
+        // let mut pieces = vec![];
         for piece_number in 0..tf.info.piece_count - 1 {
             let (offset, piece_files) = Content::get_piece_files(
                 piece_number as usize,
-                &files,
+                &content.files,
                 tf.info.piece_length as usize,
                 tf.info.length,
             );
@@ -66,19 +75,21 @@ impl Content {
                 .get_piece_hash(piece_number as usize)
                 .try_into()
                 .unwrap();
-            pieces.push(Mutex::new(Piece::new(
+            let piece = Piece::new(
                 piece_number,
                 tf.info.piece_length,
                 tf.info.piece_length / BLOCK_SIZE,
                 offset,
                 piece_files,
                 hash,
-            )));
+            );
+            //piece.written.push(Arc::new(|| {content.events.piece_written.iter().for_each(|e| e())}));
+            content.pieces.push(Mutex::new(piece));
         }
         //last piece is probably a different size
         let (offset, piece_files) = Content::get_piece_files(
             (tf.info.piece_count - 1) as usize,
-            &files,
+            &content.files,
             tf.info.piece_length as usize,
             tf.info.length,
         );
@@ -97,21 +108,24 @@ impl Content {
         }
         let block_count_goal = last_piece_size / BLOCK_SIZE + smaller_blocks;
 
-        pieces.push(Mutex::new(Piece::new(
+        let piece = Piece::new(
             tf.info.piece_count - 1,
             last_piece_size,
             block_count_goal,
             offset,
             piece_files,
             hash,
-        )));
+        );
+        //piece.written.push(Arc::new(|| {content.events.piece_written.iter().for_each(|e| e())}));
+        content.pieces.push(Mutex::new(piece));
 
-        Content {
-            pieces,
-            files,
-            destination_path: dir_path_string,
-            events: ContentEvents::new(),
-        }
+        content
+        // Content {
+        //     pieces,
+        //     files,
+        //     destination_path: dir_path_string,
+        //     events: ContentEvents::new(),
+        // }
     }
 
     pub fn preallocate(&self) {
@@ -259,6 +273,7 @@ pub struct ContentEvents {
     pub preallocaion_start: Vec<Box<dyn Fn(u32) + 'static + Send + Sync>>,
     pub preallocaion_end: Vec<Box<dyn Fn(u32) + 'static + Send + Sync>>,
     pub hash_checked: Vec<Box<dyn Fn(u32, u32) + 'static + Send + Sync>>,
+    pub piece_written: Vec<Box<dyn Fn() + 'static + Send + Sync>>,
 }
 
 impl ContentEvents {
@@ -267,6 +282,7 @@ impl ContentEvents {
             preallocaion_start: vec![],
             preallocaion_end: vec![],
             hash_checked: vec![],
+            piece_written: vec![],
         }
     }
 }
@@ -282,7 +298,7 @@ impl std::fmt::Debug for ContentEvents {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+// #[derive(Debug, Clone, PartialEq)]
 pub struct Piece {
     pub number: u32,
     size: u32,
@@ -297,6 +313,7 @@ pub struct Piece {
     files: Vec<(PathBuf, usize)>,
     block_count: u32,
     block_count_goal: u32,
+    pub written: Vec<Arc<dyn Fn() + 'static + Send + Sync>>,
 }
 
 impl Piece {
@@ -317,6 +334,7 @@ impl Piece {
             offset,
             block_count_goal,
             block_count: 0,
+            written: vec![]
         }
     }
 

@@ -31,6 +31,7 @@ pub fn run(
     torrent_file_path: String,
     download_folder: Option<String>,
     content_events: Option<ContentEvents>,
+    written_event: Option<Arc<dyn Fn() + 'static + Send + Sync>>
 ) {
     let tf_raw = fs::read(&torrent_file_path).unwrap();
     let tf = TorrentFile::from_bencode(&tf_raw).unwrap();
@@ -38,6 +39,12 @@ pub fn run(
     println!();
 
     let mut content = Content::new(&tf, download_folder);
+    if written_event.is_some() {
+        let e = written_event.unwrap();
+        for piece in &content.pieces {
+            piece.lock().unwrap().written.push(Arc::clone(&e));
+        }
+    }
 
     // content.events.preallocaion_end.push(Box::new(name));
     // content.events.hash_checked.push(Box::new(|x,y| { println!("{:?}/{}",x,y );}));
