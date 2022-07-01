@@ -389,6 +389,7 @@ impl Piece {
                     }
                 }
             }
+            self.written.iter().for_each(|e| e());
             true
         } else {
             panic!("Trying to write a piece with no buffer");
