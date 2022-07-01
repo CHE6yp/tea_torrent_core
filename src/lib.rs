@@ -2,8 +2,6 @@
 
 use bendy::decoding::FromBencode;
 use rand::Rng;
-
-use rand;
 use std::fs;
 use std::io::{stdout, ErrorKind, Read, Result, Write};
 use std::net::TcpStream;
@@ -20,18 +18,16 @@ mod tracker;
 use crate::tracker::*;
 pub mod content;
 use content::*;
+mod event;
 
 const BLOCK_SIZE: u32 = 16384;
 
-// fn name(arg: u32) {
-//     println!("ASSSSA {}", arg);
-// }
-
+//This fn needs to go. Gotta do all that in binaries it seems
 pub fn run(
     torrent_file_path: String,
     download_folder: Option<String>,
     content_events: Option<ContentEvents>,
-    written_event: Option<Arc<dyn Fn() + 'static + Send + Sync>>
+    written_event: Option<Arc<dyn Fn(()) + 'static + Send + Sync>>,
 ) {
     let tf_raw = fs::read(&torrent_file_path).unwrap();
     let tf = TorrentFile::from_bencode(&tf_raw).unwrap();
@@ -39,18 +35,14 @@ pub fn run(
     println!();
 
     let mut content = Content::new(&tf, download_folder);
-    if written_event.is_some() {
-        let e = written_event.unwrap();
+    if let Some(e) = written_event {
         for piece in &content.pieces {
-            piece.lock().unwrap().written.push(Arc::clone(&e));
+            piece.lock().unwrap().written.subscribe(Arc::clone(&e));
         }
     }
 
-    // content.events.preallocaion_end.push(Box::new(name));
-    // content.events.hash_checked.push(Box::new(|x,y| { println!("{:?}/{}",x,y );}));
-    // content.events.hash_checked.push(Box::new(|x,y| { println!("Have {} out of {}",x,y );}));
-    if content_events.is_some() {
-        content.events = content_events.unwrap();
+    if let Some(ce) = content_events {
+        content.events = ce;
     }
 
     let content = Arc::new(content);
@@ -69,7 +61,7 @@ pub fn run(
 
     let mut peers = connect_to_peers(
         respone,
-        Handshake::new(&tf.info_hash.raw()),
+        Handshake::new(tf.info_hash.raw()),
         tf.info.piece_count as usize,
     );
     let mut handles: Vec<thread::JoinHandle<_>> = vec![];
@@ -180,8 +172,7 @@ pub fn run(
         let piece_o = content
             .pieces
             .iter()
-            .filter(|piece| piece.lock().unwrap().status == PieceStatus::Missing)
-            .next();
+            .find(|piece| piece.lock().unwrap().status == PieceStatus::Missing);
         let &mut piece;
         match piece_o {
             Some(p) => piece = p,

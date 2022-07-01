@@ -4,7 +4,7 @@ use tea_torrent::run;
 fn main() {
     println!("\x1b]0;tTorrent\x07");
     let args = Args::parse();
-    run(args.torrent_file, args.destination, None);
+    run(args.torrent_file, args.destination, None, None);
 }
 
 /// CLI version of TeaTorrent. Downloads one torrent at a time.

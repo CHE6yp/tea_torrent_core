@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use crate::event::Event;
 use crate::tf;
 use crate::BLOCK_SIZE;
 use dirs;
@@ -144,10 +144,7 @@ impl Content {
             f.set_len(file.1 as u64).unwrap();
         }
         println!("Preallocation complete");
-        self.events
-            .preallocaion_end
-            .iter()
-            .for_each(|e| e(self.files.len() as u32));
+        self.events.preallocaion_end.emit(self.files.len() as u32);
     }
 
     pub fn check_content_hash(&self) {
@@ -198,7 +195,7 @@ impl Content {
                     print!("\x1b[91m");
                 }
                 PieceStatus::Available => {
-                    has = has + 1;
+                    has += 1;
                     print!("\x1b[92m");
                 }
                 PieceStatus::Awaiting(_) => unreachable!(),
@@ -208,8 +205,7 @@ impl Content {
         println!("\x1b[0m");
         self.events
             .hash_checked
-            .iter()
-            .for_each(|e| e(has, self.pieces.len() as u32));
+            .emit((has, self.pieces.len() as u32));
     }
 
     pub fn add_block(&self, piece_number: usize, offset: usize, block: &[u8]) -> Option<bool> {
@@ -268,33 +264,22 @@ impl Content {
     }
 }
 
-// #[derive(Debug)]
+#[derive(Debug)]
 pub struct ContentEvents {
-    pub preallocaion_start: Vec<Box<dyn Fn(u32) + 'static + Send + Sync>>,
-    pub preallocaion_end: Vec<Box<dyn Fn(u32) + 'static + Send + Sync>>,
-    pub hash_checked: Vec<Box<dyn Fn(u32, u32) + 'static + Send + Sync>>,
-    pub piece_written: Vec<Box<dyn Fn() + 'static + Send + Sync>>,
+    pub preallocaion_start: Event<u32>,
+    pub preallocaion_end: Event<u32>,
+    pub hash_checked: Event<(u32, u32)>,
+    pub piece_written: Event<()>,
 }
 
 impl ContentEvents {
     pub fn new() -> ContentEvents {
         ContentEvents {
-            preallocaion_start: vec![],
-            preallocaion_end: vec![],
-            hash_checked: vec![],
-            piece_written: vec![],
+            preallocaion_start: Event::new(),
+            preallocaion_end: Event::new(),
+            hash_checked: Event::new(),
+            piece_written: Event::new(),
         }
-    }
-}
-
-impl std::fmt::Debug for ContentEvents {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{:?}{:?}",
-            self.preallocaion_start.len(),
-            self.preallocaion_end.len()
-        )
     }
 }
 
@@ -313,7 +298,7 @@ pub struct Piece {
     files: Vec<(PathBuf, usize)>,
     block_count: u32,
     block_count_goal: u32,
-    pub written: Vec<Arc<dyn Fn() + 'static + Send + Sync>>,
+    pub written: Event<()>,
 }
 
 impl Piece {
@@ -334,7 +319,7 @@ impl Piece {
             offset,
             block_count_goal,
             block_count: 0,
-            written: vec![]
+            written: Event::new(),
         }
     }
 
@@ -389,7 +374,7 @@ impl Piece {
                     }
                 }
             }
-            self.written.iter().for_each(|e| e());
+            self.written.emit(());
             true
         } else {
             panic!("Trying to write a piece with no buffer");
