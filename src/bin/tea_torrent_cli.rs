@@ -1,10 +1,11 @@
 use clap::Parser;
-use tea_torrent::run;
+use tea_torrent::Torrent;
 
 fn main() {
     println!("\x1b]0;tTorrent\x07");
     let args = Args::parse();
-    run(args.torrent_file, args.destination, None);
+    let torrent = Torrent::new(args.torrent_file, args.destination, None);
+    torrent.run();
 }
 
 /// CLI version of TeaTorrent. Downloads one torrent at a time.

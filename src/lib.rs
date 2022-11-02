@@ -1,7 +1,6 @@
 use bendy::decoding::FromBencode;
 use rand::Rng;
 
-use rand;
 use std::fs;
 use std::io::{stdout, ErrorKind, Read, Result, Write};
 use std::net::TcpStream;
@@ -21,200 +20,208 @@ use content::*;
 
 const BLOCK_SIZE: u32 = 16384;
 
-// fn name(arg: u32) {
-//     println!("ASSSSA {}", arg);
-// }
+pub struct Torrent {
+    content: Content,
+    torrent_file: TorrentFile,
+}
 
-pub fn run(
-    torrent_file_path: String,
-    download_folder: Option<String>,
-    content_events: Option<ContentEvents>,
-) {
-    let tf_raw = fs::read(&torrent_file_path).unwrap();
-    let tf = TorrentFile::from_bencode(&tf_raw).unwrap();
-    println!("{}", tf);
-    println!();
+impl Torrent {
+    pub fn new(    
+        torrent_file_path: String,
+        download_folder: Option<String>,
+        content_events: Option<ContentEvents>,
+    ) -> Torrent {
+        let tf_raw = fs::read(&torrent_file_path).unwrap();
+        let tf = TorrentFile::from_bencode(&tf_raw).unwrap();
+        println!("{}", tf);
+        println!();
 
-    let mut content = Content::new(&tf, download_folder);
+        let mut content = Content::new(&tf, download_folder);
 
-    // content.events.preallocaion_end.push(Box::new(name));
-    // content.events.hash_checked.push(Box::new(|x,y| { println!("{:?}/{}",x,y );}));
-    // content.events.hash_checked.push(Box::new(|x,y| { println!("Have {} out of {}",x,y );}));
-    if content_events.is_some() {
-        content.events = content_events.unwrap();
+        // content.events.preallocaion_end.push(Box::new(name));
+        // content.events.hash_checked.push(Box::new(|x,y| { println!("{:?}/{}",x,y );}));
+        // content.events.hash_checked.push(Box::new(|x,y| { println!("Have {} out of {}",x,y );}));
+        if content_events.is_some() {
+            content.events = content_events.unwrap();
+        }
+        Torrent{torrent_file:tf, content }
     }
 
-    let content = Arc::new(content);
-    content.preallocate();
-    content.check_content_hash();
-    println!("{:?}", content.get_bitfield());
 
-    let r = connect_to_tracker(&tf, false);
-    if r.is_none() {
-        println!("Connection failed");
-        return;
-    }
+    pub fn run(self) {
 
-    let respone = r.unwrap();
-    println!("Connection complete, connecting to peers");
+        let content = Arc::new(self.content);
+        content.preallocate();
+        content.check_content_hash();
+        println!("{:?}", content.get_bitfield());
 
-    let mut peers = connect_to_peers(
-        respone,
-        Handshake::new(&tf.info_hash.raw()),
-        tf.info.piece_count as usize,
-    );
-    let mut handles: Vec<thread::JoinHandle<_>> = vec![];
+        let r = connect_to_tracker(&self.torrent_file, false);
+        if r.is_none() {
+            println!("Connection failed");
+            return;
+        }
 
-    let (tx, rx) = channel();
+        let respone = r.unwrap();
+        println!("Connection complete, connecting to peers");
 
-    //recieving messages from peers
-    for peer in &peers {
-        let peer = Arc::clone(peer);
-        let tx = tx.clone();
-        let join_handle = thread::Builder::new()
-            .name(peer.id_string())
-            .spawn(move || loop {
-                let message = peer.get_message();
+        let mut peers = connect_to_peers(
+            respone,
+            Handshake::new(&self.torrent_file.info_hash.raw()),
+            self.torrent_file.info.piece_count as usize,
+        );
+        let mut handles: Vec<thread::JoinHandle<_>> = vec![];
 
-                match message {
-                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => {
-                        panic!("Couldn't read buffer; {:?}", e.kind(),);
+        let (tx, rx) = channel();
+
+        //recieving messages from peers
+        for peer in &peers {
+            let peer = Arc::clone(peer);
+            let tx = tx.clone();
+            let join_handle = thread::Builder::new()
+                .name(peer.id_string())
+                .spawn(move || loop {
+                    let message = peer.get_message();
+
+                    match message {
+                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                        Err(e) => {
+                            panic!("Couldn't read buffer; {:?}", e.kind(),);
+                        }
+                        Ok(message) => match message {
+                            PeerMessage::KeepAlive => (),
+                            PeerMessage::Choke => {
+                                println!("Choked by {}", peer.id_string());
+                                peer.status.lock().unwrap().2 = true;
+                            }
+                            PeerMessage::Unchoke => {
+                                println!("Unchoked by {}", peer.id_string());
+                                peer.status.lock().unwrap().2 = false;
+                                *peer.busy.lock().unwrap() = false;
+                            }
+                            PeerMessage::Interested => {
+                                println!("interested");
+                                peer.status.lock().unwrap().3 = true;
+                            }
+                            PeerMessage::NotInterested => {
+                                println!("not interested");
+                                peer.status.lock().unwrap().3 = false;
+                            }
+                            PeerMessage::Have(index) => {
+                                peer.add_piece_to_bitfield(index);
+                            }
+                            PeerMessage::Bitfield(field) => {
+                                *peer.bitfield.lock().unwrap() = field;
+                            }
+                            PeerMessage::Request(_index, _begin, _length) => {
+                                println!("request");
+                            }
+                            PeerMessage::Piece(index, begin, block) => {
+                                tx.send((Arc::clone(&peer), (index, begin, block))).unwrap();
+                            }
+                            PeerMessage::Cancel(_index, _begin, _length) => {
+                                println!("cancel");
+                            }
+                            PeerMessage::Port(_port) => {
+                                println!("port {}", peer.id_string());
+                            }
+                        },
                     }
-                    Ok(message) => match message {
-                        PeerMessage::KeepAlive => (),
-                        PeerMessage::Choke => {
-                            println!("Choked by {}", peer.id_string());
-                            peer.status.lock().unwrap().2 = true;
-                        }
-                        PeerMessage::Unchoke => {
-                            println!("Unchoked by {}", peer.id_string());
-                            peer.status.lock().unwrap().2 = false;
-                            *peer.busy.lock().unwrap() = false;
-                        }
-                        PeerMessage::Interested => {
-                            println!("interested");
-                            peer.status.lock().unwrap().3 = true;
-                        }
-                        PeerMessage::NotInterested => {
-                            println!("not interested");
-                            peer.status.lock().unwrap().3 = false;
-                        }
-                        PeerMessage::Have(index) => {
-                            peer.add_piece_to_bitfield(index);
-                        }
-                        PeerMessage::Bitfield(field) => {
-                            *peer.bitfield.lock().unwrap() = field;
-                        }
-                        PeerMessage::Request(_index, _begin, _length) => {
-                            println!("request");
-                        }
-                        PeerMessage::Piece(index, begin, block) => {
-                            tx.send((Arc::clone(&peer), (index, begin, block))).unwrap();
-                        }
-                        PeerMessage::Cancel(_index, _begin, _length) => {
-                            println!("cancel");
-                        }
-                        PeerMessage::Port(_port) => {
-                            println!("port {}", peer.id_string());
-                        }
-                    },
-                }
-            })
-            .unwrap();
+                })
+                .unwrap();
 
-        handles.push(join_handle);
-    }
+            handles.push(join_handle);
+        }
 
-    let tf = Arc::new(tf);
-    //recieving blocks and writing them to pieces (and then to file)
-    // let mut content = content.clone();
-    let content_write = Arc::clone(&content);
-    handles.push(thread::spawn(move || {
-        rx.iter().for_each(|(peer, (index, begin, block))| {
-            let piece_number = index;
-            let offset = begin;
+        let tf = Arc::new(self.torrent_file);
+        //recieving blocks and writing them to pieces (and then to file)
+        // let mut content = content.clone();
+        let content_write = Arc::clone(&content);
+        handles.push(thread::spawn(move || {
+            rx.iter().for_each(|(peer, (index, begin, block))| {
+                let piece_number = index;
+                let offset = begin;
 
-            //TODO need to find a way to make peer not busy before writing the piece to file.
-            //my theory is we will be able to download and write at the same time then
-            //and this thread will make sense.
-            //It will probably take more RAM though
-            let r = content_write.add_block(piece_number as usize, offset as usize, &block);
-            match r {
-                Some(true) => {
-                    println!(
-                        " \x1b[92mCorrect hash!\x1b[0m Piece {} from {}",
-                        piece_number,
-                        peer.id_string(),
-                    );
-                    *peer.busy.lock().unwrap() = false;
+                //TODO need to find a way to make peer not busy before writing the piece to file.
+                //my theory is we will be able to download and write at the same time then
+                //and this thread will make sense.
+                //It will probably take more RAM though
+                let r = content_write.add_block(piece_number as usize, offset as usize, &block);
+                match r {
+                    Some(true) => {
+                        println!(
+                            " \x1b[92mCorrect hash!\x1b[0m Piece {} from {}",
+                            piece_number,
+                            peer.id_string(),
+                        );
+                        *peer.busy.lock().unwrap() = false;
+                    }
+                    Some(false) => {
+                        println!(
+                            " \x1b[91mHash doesn't match!\x1b[0m Piece {} from{}",
+                            piece_number,
+                            peer.id_string(),
+                        );
+                        *peer.busy.lock().unwrap() = false;
+                    }
+                    None => (),
                 }
-                Some(false) => {
-                    println!(
-                        " \x1b[91mHash doesn't match!\x1b[0m Piece {} from{}",
-                        piece_number,
-                        peer.id_string(),
-                    );
-                    *peer.busy.lock().unwrap() = false;
-                }
-                None => (),
+            });
+            println!("Write thread DONE!");
+        }));
+
+        //sending messages to peers
+        // let mut missing_pieces = content.missing_pieces.iter();
+        // let mut piece = missing_pieces.next();
+
+        loop {
+            let piece_o = content
+                .pieces
+                .iter()
+                .filter(|piece| piece.lock().unwrap().status == PieceStatus::Missing)
+                .next();
+            let &mut piece;
+            match piece_o {
+                Some(p) => piece = p,
+                None => continue,
             }
-        });
-        println!("Write thread DONE!");
-    }));
+            let p = piece.lock().unwrap().number;
 
-    //sending messages to peers
-    // let mut missing_pieces = content.missing_pieces.iter();
-    // let mut piece = missing_pieces.next();
+            let peersclone = peers.clone();
+            let peersclone = peersclone
+                .into_iter()
+                .filter(|peer| peer.has_piece(p.try_into().unwrap()) && !(*peer.busy.lock().unwrap()))
+                .collect::<Vec<Arc<Peer>>>();
+            let peer = peersclone.first();
 
-    loop {
-        let piece_o = content
-            .pieces
-            .iter()
-            .filter(|piece| piece.lock().unwrap().status == PieceStatus::Missing)
-            .next();
-        let &mut piece;
-        match piece_o {
-            Some(p) => piece = p,
-            None => continue,
-        }
-        let p = piece.lock().unwrap().number;
+            if peer.is_none() {
+                continue;
+            }
 
-        let peersclone = peers.clone();
-        let peersclone = peersclone
-            .into_iter()
-            .filter(|peer| peer.has_piece(p.try_into().unwrap()) && !(*peer.busy.lock().unwrap()))
-            .collect::<Vec<Arc<Peer>>>();
-        let peer = peersclone.first();
+            let peer = Arc::clone(peer.unwrap());
 
-        if peer.is_none() {
-            continue;
-        }
-
-        let peer = Arc::clone(peer.unwrap());
-
-        let piece_length = if p == tf.info.piece_count - 1 {
-            //last piece
-            tf.info.length as u32 - (tf.info.piece_length as u32 * p)
-        } else {
-            tf.info.piece_length
-        };
-        let res = peer.request(&peer.stream, p as u32, piece_length);
-        match res {
-            Ok(true) => piece.lock().unwrap().make_awaiting(),
-            Ok(false) => (),
-            Err(_e) => {
-                println!("\x1b[91mRemoving peer {} \x1b[0m", peer.id_string());
-                let index = peersclone.iter().position(|x| x.id == peer.id).unwrap();
-                peers.remove(index);
+            let piece_length = if p == tf.info.piece_count - 1 {
+                //last piece
+                tf.info.length as u32 - (tf.info.piece_length as u32 * p)
+            } else {
+                tf.info.piece_length
+            };
+            let res = peer.request(&peer.stream, p as u32, piece_length);
+            match res {
+                Ok(true) => piece.lock().unwrap().make_awaiting(),
+                Ok(false) => (),
+                Err(_e) => {
+                    println!("\x1b[91mRemoving peer {} \x1b[0m", peer.id_string());
+                    let index = peersclone.iter().position(|x| x.id == peer.id).unwrap();
+                    peers.remove(index);
+                }
             }
         }
-    }
-    //println!("missing_pieces DONE!");
+        //println!("missing_pieces DONE!");
 
-    // for handle in handles {
-    //     let _r = handle.join();
-    // }
+        // for handle in handles {
+        //     let _r = handle.join();
+        // }
+    }
 }
 
 fn connect_to_peers(
