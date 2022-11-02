@@ -26,7 +26,7 @@ pub struct Torrent {
 }
 
 impl Torrent {
-    pub fn new(    
+    pub fn new(
         torrent_file_path: String,
         download_folder: Option<String>,
         content_events: Option<ContentEvents>,
@@ -44,13 +44,14 @@ impl Torrent {
         if let Some(events) = content_events {
             content.events = events;
         }
-        Torrent{torrent_file:tf, content }
+        Torrent {
+            torrent_file: tf,
+            content,
+        }
     }
 
-
-    pub fn run(self) {
-
-        let content = Arc::new(self.content);
+    pub fn run(&self) {
+        let content = Arc::new(&self.content);
         content.preallocate();
         content.check_content_hash();
         println!("{:?}", content.get_bitfield());
@@ -132,88 +133,92 @@ impl Torrent {
             handles.push(join_handle);
         }
 
-        let tf = Arc::new(self.torrent_file);
+        let tf = Arc::new(&self.torrent_file);
         //recieving blocks and writing them to pieces (and then to file)
-        // let mut content = content.clone();
-        let content_write = Arc::clone(&content);
-        handles.push(thread::spawn(move || {
-            rx.iter().for_each(|(peer, (index, begin, block))| {
-                let piece_number = index;
-                let offset = begin;
+        let content_write = Arc::clone(&content); //THIS is why SELF ESCAPES in an unscoped thread!!!!
+        thread::scope(|s| {
+            s.spawn(move || {
+                rx.iter().for_each(|(peer, (index, begin, block))| {
+                    let piece_number = index;
+                    let offset = begin;
 
-                //TODO need to find a way to make peer not busy before writing the piece to file.
-                //my theory is we will be able to download and write at the same time then
-                //and this thread will make sense.
-                //It will probably take more RAM though
-                let r = content_write.add_block(piece_number as usize, offset as usize, &block);
-                match r {
-                    Some(true) => {
-                        println!(
-                            " \x1b[92mCorrect hash!\x1b[0m Piece {} from {}",
-                            piece_number,
-                            peer.id_string(),
-                        );
-                        *peer.busy.lock().unwrap() = false;
+                    //TODO need to find a way to make peer not busy before writing the piece to file.
+                    //my theory is we will be able to download and write at the same time then
+                    //and this thread will make sense.
+                    //It will probably take more RAM though
+                    let r = content_write.add_block(piece_number as usize, offset as usize, &block);
+                    match r {
+                        Some(true) => {
+                            println!(
+                                " \x1b[92mCorrect hash!\x1b[0m Piece {} from {}",
+                                piece_number,
+                                peer.id_string(),
+                            );
+                            *peer.busy.lock().unwrap() = false;
+                        }
+                        Some(false) => {
+                            println!(
+                                " \x1b[91mHash doesn't match!\x1b[0m Piece {} from{}",
+                                piece_number,
+                                peer.id_string(),
+                            );
+                            *peer.busy.lock().unwrap() = false;
+                        }
+                        None => (),
                     }
-                    Some(false) => {
-                        println!(
-                            " \x1b[91mHash doesn't match!\x1b[0m Piece {} from{}",
-                            piece_number,
-                            peer.id_string(),
-                        );
-                        *peer.busy.lock().unwrap() = false;
-                    }
-                    None => (),
-                }
+                });
+                println!("Write thread DONE!");
             });
-            println!("Write thread DONE!");
-        }));
 
-        //sending messages to peers
-        // let mut missing_pieces = content.missing_pieces.iter();
-        // let mut piece = missing_pieces.next();
+            //sending messages to peers
+            // let mut missing_pieces = content.missing_pieces.iter();
+            // let mut piece = missing_pieces.next();
 
-        loop {
-            let piece_o = content
-                .pieces
-                .iter().find(|piece| piece.lock().unwrap().status == PieceStatus::Missing);
-            let &mut piece;
-            match piece_o {
-                Some(p) => piece = p,
-                None => continue,
-            }
-            let p = piece.lock().unwrap().number;
+            loop {
+                let piece_o = content
+                    .pieces
+                    .iter()
+                    .find(|piece| piece.lock().unwrap().status == PieceStatus::Missing);
+                let &mut piece;
+                match piece_o {
+                    Some(p) => piece = p,
+                    None => continue,
+                }
+                let p = piece.lock().unwrap().number;
 
-            let peersclone = peers.clone();
-            let peersclone = peersclone
-                .into_iter()
-                .filter(|peer| peer.has_piece(p.try_into().unwrap()) && !(*peer.busy.lock().unwrap()))
-                .collect::<Vec<Arc<Peer>>>();
-            let peer = peersclone.first();
+                let peersclone = peers.clone();
+                let peersclone = peersclone
+                    .into_iter()
+                    .filter(|peer| {
+                        peer.has_piece(p.try_into().unwrap()) && !(*peer.busy.lock().unwrap())
+                    })
+                    .collect::<Vec<Arc<Peer>>>();
+                let peer = peersclone.first();
 
-            if peer.is_none() {
-                continue;
-            }
+                if peer.is_none() {
+                    continue;
+                }
 
-            let peer = Arc::clone(peer.unwrap());
+                let peer = Arc::clone(peer.unwrap());
 
-            let piece_length = if p == tf.info.piece_count - 1 {
-                //last piece
-                tf.info.length as u32 - (tf.info.piece_length as u32 * p)
-            } else {
-                tf.info.piece_length
-            };
-            let res = peer.request(&peer.stream, p as u32, piece_length);
-            match res {
-                Ok(true) => piece.lock().unwrap().make_awaiting(),
-                Ok(false) => (),
-                Err(_e) => {
-                    println!("\x1b[91mRemoving peer {} \x1b[0m", peer.id_string());
-                    let index = peersclone.iter().position(|x| x.id == peer.id).unwrap();
-                    peers.remove(index);
+                let piece_length = if p == tf.info.piece_count - 1 {
+                    //last piece
+                    tf.info.length as u32 - (tf.info.piece_length as u32 * p)
+                } else {
+                    tf.info.piece_length
+                };
+                let res = peer.request(&peer.stream, p as u32, piece_length);
+                match res {
+                    Ok(true) => piece.lock().unwrap().make_awaiting(),
+                    Ok(false) => (),
+                    Err(_e) => {
+                        println!("\x1b[91mRemoving peer {} \x1b[0m", peer.id_string());
+                        let index = peersclone.iter().position(|x| x.id == peer.id).unwrap();
+                        peers.remove(index);
+                    }
                 }
             }
-        }
+        });
         //println!("missing_pieces DONE!");
 
         // for handle in handles {
