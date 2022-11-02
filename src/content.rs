@@ -184,7 +184,7 @@ impl Content {
                     print!("\x1b[91m");
                 }
                 PieceStatus::Available => {
-                    has = has + 1;
+                    has += 1;
                     print!("\x1b[92m");
                 }
                 PieceStatus::Awaiting(_) => unreachable!(),
@@ -271,6 +271,12 @@ impl ContentEvents {
     }
 }
 
+impl Default for ContentEvents {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl std::fmt::Debug for ContentEvents {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -282,7 +288,7 @@ impl std::fmt::Debug for ContentEvents {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Piece {
     pub number: u32,
     size: u32,
@@ -399,7 +405,7 @@ impl Piece {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PieceStatus {
     Missing,
     Available,

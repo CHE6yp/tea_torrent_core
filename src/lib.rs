@@ -41,8 +41,8 @@ impl Torrent {
         // content.events.preallocaion_end.push(Box::new(name));
         // content.events.hash_checked.push(Box::new(|x,y| { println!("{:?}/{}",x,y );}));
         // content.events.hash_checked.push(Box::new(|x,y| { println!("Have {} out of {}",x,y );}));
-        if content_events.is_some() {
-            content.events = content_events.unwrap();
+        if let Some(events) = content_events {
+            content.events = events;
         }
         Torrent{torrent_file:tf, content }
     }
@@ -66,7 +66,7 @@ impl Torrent {
 
         let mut peers = connect_to_peers(
             respone,
-            Handshake::new(&self.torrent_file.info_hash.raw()),
+            Handshake::new(self.torrent_file.info_hash.raw()),
             self.torrent_file.info.piece_count as usize,
         );
         let mut handles: Vec<thread::JoinHandle<_>> = vec![];
@@ -176,9 +176,7 @@ impl Torrent {
         loop {
             let piece_o = content
                 .pieces
-                .iter()
-                .filter(|piece| piece.lock().unwrap().status == PieceStatus::Missing)
-                .next();
+                .iter().find(|piece| piece.lock().unwrap().status == PieceStatus::Missing);
             let &mut piece;
             match piece_o {
                 Some(p) => piece = p,
@@ -394,7 +392,7 @@ impl Peer {
             2 => PeerMessage::Interested,
             3 => PeerMessage::NotInterested,
             4 => PeerMessage::Have(u32::from_be_bytes(message_buf[1..5].try_into().unwrap())),
-            5 => PeerMessage::Bitfield((&message_buf[1..]).to_vec()),
+            5 => PeerMessage::Bitfield(message_buf[1..].to_vec()),
             6 => PeerMessage::Request(
                 u32::from_be_bytes(message_buf[1..5].try_into().unwrap()),
                 u32::from_be_bytes(message_buf[5..9].try_into().unwrap()),
@@ -403,7 +401,7 @@ impl Peer {
             7 => PeerMessage::Piece(
                 u32::from_be_bytes(message_buf[1..5].try_into().unwrap()),
                 u32::from_be_bytes(message_buf[5..9].try_into().unwrap()),
-                (&message_buf[9..]).to_vec(),
+                message_buf[9..].to_vec(),
             ),
             8 => PeerMessage::Cancel(
                 u32::from_be_bytes(message_buf[1..5].try_into().unwrap()),
