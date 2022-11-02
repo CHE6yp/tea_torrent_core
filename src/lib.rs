@@ -21,8 +21,8 @@ use content::*;
 const BLOCK_SIZE: u32 = 16384;
 
 pub struct Torrent {
-    content: Content,
-    torrent_file: TorrentFile,
+    pub content: Content,
+    pub torrent_file: TorrentFile,
 }
 
 impl Torrent {
