@@ -20,6 +20,7 @@ use content::*;
 
 const BLOCK_SIZE: u32 = 16384;
 
+#[derive(Debug)]
 pub struct Torrent {
     pub content: Content,
     pub torrent_file: TorrentFile,
