@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::sync::Arc;
 use tea_torrent::Torrent;
 
 fn main() {
@@ -6,7 +7,8 @@ fn main() {
     let args = Args::parse();
     let torrent = Torrent::new(args.torrent_file, args.destination, None);
     //torrent.run();
-    let jh = tea_torrent::run_torrent(torrent);
+    let t = Arc::new(torrent);
+    let jh = tea_torrent::run_torrent(t);
     jh.join();
 }
 

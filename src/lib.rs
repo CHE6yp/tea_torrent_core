@@ -265,7 +265,7 @@ impl Torrent {
     }
 }
 
-pub fn run_torrent(torrent: Torrent) -> JoinHandle<()> {
+pub fn run_torrent(torrent: Arc<Torrent>) -> JoinHandle<()> {
     thread::spawn(move || torrent.run())
 }
 
