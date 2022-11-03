@@ -5,7 +5,9 @@ fn main() {
     println!("\x1b]0;tTorrent\x07");
     let args = Args::parse();
     let torrent = Torrent::new(args.torrent_file, args.destination, None);
-    torrent.run();
+    //torrent.run();
+    let jh = tea_torrent::run_torrent(torrent);
+    jh.join();
 }
 
 /// CLI version of TeaTorrent. Downloads one torrent at a time.

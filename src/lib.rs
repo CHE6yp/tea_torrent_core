@@ -1,5 +1,6 @@
 use bendy::decoding::FromBencode;
 use rand::Rng;
+use std::thread::JoinHandle;
 
 use std::fs;
 use std::io::{stdout, ErrorKind, Read, Result, Write};
@@ -21,9 +22,17 @@ use content::*;
 const BLOCK_SIZE: u32 = 16384;
 
 #[derive(Debug)]
+pub enum TorrentState {
+    Stop,
+    Start,
+    Pause,
+}
+
+#[derive(Debug)]
 pub struct Torrent {
     pub content: Content,
     pub torrent_file: TorrentFile,
+    pub state: Arc<Mutex<TorrentState>>,
 }
 
 impl Torrent {
@@ -48,6 +57,18 @@ impl Torrent {
         Torrent {
             torrent_file: tf,
             content,
+            state: Arc::new(Mutex::new(TorrentState::Start)),
+        }
+    }
+
+    pub fn change_state(&self, state: TorrentState) {
+        match state {
+            TorrentState::Start => {
+                *self.state.lock().unwrap() = state;
+                //run_torrent(self);
+            }
+            TorrentState::Stop => {}
+            TorrentState::Pause => {}
         }
     }
 
@@ -77,56 +98,64 @@ impl Torrent {
 
         //recieving messages from peers
         for peer in &peers {
+            let state = Arc::clone(&self.state);
             let peer = Arc::clone(peer);
             let tx = tx.clone();
             let join_handle = thread::Builder::new()
                 .name(peer.id_string())
-                .spawn(move || loop {
-                    let message = peer.get_message();
-
-                    match message {
-                        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                        Err(e) => {
-                            panic!("Couldn't read buffer; {:?}", e.kind(),);
+                .spawn(move || {
+                    println!("Spawned thread {}", peer.id_string());
+                    loop {
+                        if let TorrentState::Stop = *state.lock().unwrap() {
+                            println!("Breaking thread {}", peer.id_string());
+                            break;
                         }
-                        Ok(message) => match message {
-                            PeerMessage::KeepAlive => (),
-                            PeerMessage::Choke => {
-                                println!("Choked by {}", peer.id_string());
-                                peer.status.lock().unwrap().2 = true;
+                        let message = peer.get_message();
+
+                        match message {
+                            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                            Err(e) => {
+                                panic!("Couldn't read buffer; {:?}", e.kind(),);
                             }
-                            PeerMessage::Unchoke => {
-                                println!("Unchoked by {}", peer.id_string());
-                                peer.status.lock().unwrap().2 = false;
-                                *peer.busy.lock().unwrap() = false;
-                            }
-                            PeerMessage::Interested => {
-                                println!("interested");
-                                peer.status.lock().unwrap().3 = true;
-                            }
-                            PeerMessage::NotInterested => {
-                                println!("not interested");
-                                peer.status.lock().unwrap().3 = false;
-                            }
-                            PeerMessage::Have(index) => {
-                                peer.add_piece_to_bitfield(index);
-                            }
-                            PeerMessage::Bitfield(field) => {
-                                *peer.bitfield.lock().unwrap() = field;
-                            }
-                            PeerMessage::Request(_index, _begin, _length) => {
-                                println!("request");
-                            }
-                            PeerMessage::Piece(index, begin, block) => {
-                                tx.send((Arc::clone(&peer), (index, begin, block))).unwrap();
-                            }
-                            PeerMessage::Cancel(_index, _begin, _length) => {
-                                println!("cancel");
-                            }
-                            PeerMessage::Port(_port) => {
-                                println!("port {}", peer.id_string());
-                            }
-                        },
+                            Ok(message) => match message {
+                                PeerMessage::KeepAlive => (),
+                                PeerMessage::Choke => {
+                                    println!("Choked by {}", peer.id_string());
+                                    peer.status.lock().unwrap().2 = true;
+                                }
+                                PeerMessage::Unchoke => {
+                                    println!("Unchoked by {}", peer.id_string());
+                                    peer.status.lock().unwrap().2 = false;
+                                    *peer.busy.lock().unwrap() = false;
+                                }
+                                PeerMessage::Interested => {
+                                    println!("interested");
+                                    peer.status.lock().unwrap().3 = true;
+                                }
+                                PeerMessage::NotInterested => {
+                                    println!("not interested");
+                                    peer.status.lock().unwrap().3 = false;
+                                }
+                                PeerMessage::Have(index) => {
+                                    peer.add_piece_to_bitfield(index);
+                                }
+                                PeerMessage::Bitfield(field) => {
+                                    *peer.bitfield.lock().unwrap() = field;
+                                }
+                                PeerMessage::Request(_index, _begin, _length) => {
+                                    println!("request");
+                                }
+                                PeerMessage::Piece(index, begin, block) => {
+                                    tx.send((Arc::clone(&peer), (index, begin, block))).unwrap();
+                                }
+                                PeerMessage::Cancel(_index, _begin, _length) => {
+                                    println!("cancel");
+                                }
+                                PeerMessage::Port(_port) => {
+                                    println!("port {}", peer.id_string());
+                                }
+                            },
+                        }
                     }
                 })
                 .unwrap();
@@ -138,7 +167,9 @@ impl Torrent {
         //recieving blocks and writing them to pieces (and then to file)
         let content_write = Arc::clone(&content); //THIS is why SELF ESCAPES in an unscoped thread!!!!
         thread::scope(|s| {
+            println!("Opening scope");
             s.spawn(move || {
+                println!("Spawned write thread");
                 rx.iter().for_each(|(peer, (index, begin, block))| {
                     let piece_number = index;
                     let offset = begin;
@@ -175,7 +206,13 @@ impl Torrent {
             // let mut missing_pieces = content.missing_pieces.iter();
             // let mut piece = missing_pieces.next();
 
+            println!("Starting message loop");
             loop {
+                if let TorrentState::Stop = *self.state.lock().unwrap() {
+                    println!("Breaking message loop");
+                    drop(tx);
+                    break;
+                }
                 let piece_o = content
                     .pieces
                     .iter()
@@ -220,12 +257,16 @@ impl Torrent {
                 }
             }
         });
-        //println!("missing_pieces DONE!");
+        println!("missing_pieces DONE!");
 
-        // for handle in handles {
-        //     let _r = handle.join();
-        // }
+        for handle in handles {
+            let _r = handle.join();
+        }
     }
+}
+
+pub fn run_torrent(torrent: Torrent) -> JoinHandle<()> {
+    thread::spawn(move || torrent.run())
 }
 
 fn connect_to_peers(
