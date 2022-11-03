@@ -62,14 +62,7 @@ impl Torrent {
     }
 
     pub fn change_state(&self, state: TorrentState) {
-        match state {
-            TorrentState::Start => {
-                *self.state.lock().unwrap() = state;
-                //run_torrent(self);
-            }
-            TorrentState::Stop => {}
-            TorrentState::Pause => {}
-        }
+        *self.state.lock().unwrap() = state;
     }
 
     pub fn run(&self) {
