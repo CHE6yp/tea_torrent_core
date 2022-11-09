@@ -1,7 +1,7 @@
 use crate::TorrentFile;
 use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
-use std::io::Read;
 use std::net::SocketAddr;
+mod http;
 
 #[derive(Debug)]
 pub struct TrackerResponse {
@@ -74,7 +74,7 @@ pub fn connect_to_tracker(tf: &TorrentFile) -> Option<TrackerResponse> {
             length
         );
 
-        stuff(&url)
+        http::get(&url)
     };
     let to_tracker_response = |body: Vec<u8>| -> Result<TrackerResponse, DecodeErrorWrapper> {
         let tr = TrackerResponse::from_bencode(&body);
@@ -135,103 +135,4 @@ impl DecodeErrorWrapper {
     fn unwrap(self) -> DecodeError {
         self.derr
     }
-}
-
-use std::io::Write;
-use std::net::{Shutdown, TcpStream};
-
-//host path
-fn parse_url(url: &str) -> (String, u16, String) {
-    let parsed = url::Url::parse(url).unwrap();
-    let host = parsed.host_str().unwrap();
-    let port = parsed.port_or_known_default();
-    let path = parsed.path();
-    let query = parsed.query().unwrap();
-
-    (
-        format!("{}", host),
-        port.unwrap(),
-        format!("{}?{}", path, query),
-    )
-}
-
-fn stuff(url: &str) -> (u16, Vec<String>, Vec<u8>) {
-    let announce_path = parse_url(url);
-    let mut stream = TcpStream::connect(&format!("{}:{}", announce_path.0, announce_path.1))
-        .expect("Cannot connect");
-
-    let mut body = String::new();
-    body.push_str(format!("GET {} HTTP/1.1", &announce_path.2).as_str());
-    body.push_str("\r\n");
-    body.push_str(format!("Host: {}", &announce_path.0).as_str());
-    body.push_str("\r\n");
-    body.push_str("User-Agent: teatorrent/0.0.3");
-    body.push_str("\r\n");
-    body.push_str("Accept: */*");
-    body.push_str("\r\n");
-    body.push_str("accept-encoding: gzip");
-    body.push_str("\r\n");
-    body.push_str("Content-Type: application/octet-stream");
-    body.push_str("\r\n");
-    body.push_str("Connection: close");
-    body.push_str("\r\n");
-    body.push_str("\r\n");
-    println!("{}\r\n", body);
-    stream
-        .write_all(body.as_bytes())
-        .expect("Cannot write bytes");
-
-    println!("Newline {:?}", "\r\n".as_bytes());
-    let mut response = vec![];
-    let x = 13;
-    stream
-        .read_to_end(&mut response)
-        .expect("Cannot read response");
-    println!("{:?}", &response[0..x]);
-    // println!("{:?}", response);
-    // let response_slice = String::from_utf8_lossy(&response[0..x]);
-    // let _response = String::from_utf8_lossy(&response);
-
-    for line in get_lines(&response) {
-        println!("{}", String::from_utf8_lossy(line));
-    }
-
-    let response = parse_lines(get_lines(&response));
-    println!("{:?}", response);
-
-    // println!("{}", response);
-    // println!("{}", response_slice);
-    stream.shutdown(Shutdown::Both).expect("Shutdown failed");
-    response
-}
-
-fn get_lines(response: &Vec<u8>) -> Vec<&[u8]> {
-    let mut start = 0;
-    let mut lines = vec![];
-    for index in 1..response.len() {
-        if response[index - 1] == 13 && response[index] == 10 {
-            lines.push(&response[start..index - 1]);
-            start = index + 1;
-        }
-    }
-    lines.push(&response[start..]);
-    lines
-}
-
-fn parse_lines(lines: Vec<&[u8]>) -> (u16, Vec<String>, Vec<u8>) {
-    let status_code: u16 = 0;
-    let mut headers: Vec<String> = vec![];
-    let body: Vec<u8>;
-
-    let _status_code_string = String::from_utf8(lines[0].to_vec());
-    for line in &lines[1..] {
-        if line == &[] {
-            break;
-        }
-        headers.push(String::from_utf8(line.to_vec()).unwrap());
-    }
-
-    body = lines.last().unwrap().to_vec();
-
-    (status_code, headers, body)
 }
