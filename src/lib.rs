@@ -71,7 +71,7 @@ impl Torrent {
         content.check_content_hash();
         println!("{:?}", content.get_bitfield());
 
-        let r = connect_to_tracker(&self.torrent_file, false);
+        let r = connect_to_tracker(&self.torrent_file);
         if r.is_none() {
             println!("Connection failed");
             return;

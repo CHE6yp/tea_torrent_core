@@ -1,8 +1,7 @@
 use crate::TorrentFile;
 use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
-use std::io::Read;
 use std::net::SocketAddr;
-use ureq::{Error, Response};
+mod http;
 
 #[derive(Debug)]
 pub struct TrackerResponse {
@@ -65,11 +64,8 @@ impl FromBencode for TrackerResponse {
     }
 }
 
-pub fn connect_to_tracker(
-    tf: &TorrentFile,
-    allow_backup_trackers: bool,
-) -> Option<TrackerResponse> {
-    let conn = |tracker: &str, info_hash: &str, length: usize| -> Result<Response, ureq::Error> {
+pub fn connect_to_tracker(tf: &TorrentFile) -> Option<TrackerResponse> {
+    let conn = |tracker: &str, info_hash: &str, length: usize| -> (u16, Vec<String>, Vec<u8>) {
         println!("Connecting to tracker {:?}", tracker);
         let url = format!("{}{}info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
             tracker,
@@ -78,14 +74,10 @@ pub fn connect_to_tracker(
             length
         );
 
-        ureq::get(&url)
-            .set("Content-Type", "application/octet-stream")
-            .call()
+        http::get(&url)
     };
-    let to_tracker_response = |resp: Response| -> Result<TrackerResponse, DecodeErrorWrapper> {
-        let mut bytes: Vec<u8> = Vec::new();
-        resp.into_reader().read_to_end(&mut bytes)?;
-        let tr = TrackerResponse::from_bencode(&bytes);
+    let to_tracker_response = |body: Vec<u8>| -> Result<TrackerResponse, DecodeErrorWrapper> {
+        let tr = TrackerResponse::from_bencode(&body);
         match tr {
             Ok(tr) => Ok(tr),
             Err(e) => Err(DecodeErrorWrapper { derr: e }),
@@ -102,21 +94,9 @@ pub fn connect_to_tracker(
                     &tf.info_hash.as_string_url_encoded(),
                     tf.info.length,
                 );
-                match result {
-                    Ok(r) => match to_tracker_response(r) {
-                        Ok(r) => return Some(r),
-                        Err(e) => println!("{}", e.unwrap()),
-                    },
-                    Err(Error::Status(code, response)) => {
-                        println!(
-                            "Error\nCode: {}\nResponse: {}",
-                            code,
-                            response.status_text()
-                        )
-                    }
-                    Err(_) => {
-                        println!("Some kind of io/transport error ");
-                    }
+                match to_tracker_response(result.2) {
+                    Ok(r) => return Some(r),
+                    Err(e) => println!("{}", e.unwrap()),
                 }
             }
         }
@@ -126,79 +106,12 @@ pub fn connect_to_tracker(
             &tf.info_hash.as_string_url_encoded(),
             tf.info.length,
         );
-        match result {
-            Ok(r) => match to_tracker_response(r) {
-                Ok(r) => return Some(r),
-                Err(e) => println!("{}", e.unwrap()),
-            },
-            Err(Error::Status(code, response)) => {
-                println!(
-                    "Error\nCode: {}\nResponse: {}",
-                    code,
-                    response.status_text()
-                )
-            }
-            Err(_) => { /* some kind of io/transport error */ }
-        }
-    }
-    if allow_backup_trackers {
-        for tracker in backup_trackers() {
-            result = conn(
-                &tracker,
-                &tf.info_hash.as_string_url_encoded(),
-                tf.info.length,
-            );
-            match result {
-                Ok(r) => match to_tracker_response(r) {
-                    Ok(r) => return Some(r),
-                    Err(e) => println!("{}", e.unwrap()),
-                },
-                Err(Error::Status(code, response)) => {
-                    println!(
-                        "Error\nCode: {}\nResponse: {}",
-                        code,
-                        response.status_text()
-                    )
-                }
-                Err(_) => {
-                    println!("Some kind of io/transport error ");
-                }
-            }
+        match to_tracker_response(result.2) {
+            Ok(r) => return Some(r),
+            Err(e) => println!("{}", e.unwrap()),
         }
     }
     None
-}
-
-//BACKUP TRACKERS!!!
-fn backup_trackers() -> [String; 25] {
-    [
-        "https://tr.abiir.top:443/announce".to_string(), //best amount of peers!!!
-        "http://tracker.files.fm:6969/announce".to_string(),
-        "http://tracker.mywaifu.best:6969/announce".to_string(),
-        "https://tracker.nanoha.org:443/announce".to_string(),
-        "http://tracker2.ctix.cn:6969/announce".to_string(),
-        "http://t.overflow.biz:6969/announce".to_string(),
-        "https://tracker.babico.name.tr:443/announce".to_string(),
-        "http://bt.okmp3.ru:2710/announce".to_string(),
-        "https://track.plop.pm:8989/announce".to_string(), //?? gave localhost as peer
-        "http://tracker.openbittorrent.com:80/announce".to_string(),
-        //failed
-        "https://tracker.lilithraws.cf:443/announce".to_string(),
-        "http://ipv6.govt.hu:6969/announce".to_string(),
-        "http://open.acgnxtracker.com:80/announce".to_string(),
-        "http://t.publictracker.xyz:6969/announce".to_string(),
-        "https://tr.burnabyhighstar.com:443/announce".to_string(),
-        "http://ipv6.1337.cx:6969/announce".to_string(),
-        "http://i-p-v-6.tk:6969/announce".to_string(),
-        "http://tracker.ipv6tracker.ru:80/announce".to_string(),
-        "http://tracker.k.vu:6969/announce".to_string(),
-        "http://t.nyaatracker.com:80/announce".to_string(),
-        "http://t.acg.rip:6699/announce".to_string(),
-        "https://tracker.iriseden.fr:443/announce".to_string(),
-        "http://tracker.gbitt.info:80/announce".to_string(),
-        "https://chihaya-heroku.120181311.xyz:443/announce".to_string(),
-        "https://opentracker.i2p.rocks:443/announce".to_string(),
-    ]
 }
 
 /*
