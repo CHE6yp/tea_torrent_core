@@ -69,7 +69,7 @@ impl Torrent {
         let content = Arc::new(&self.content);
         content.preallocate();
         content.check_content_hash();
-        println!("{:?}", content.get_bitfield());
+        println!("Bitfield: {:?}", content.get_bitfield());
 
         let r = connect_to_tracker(&self.torrent_file);
         if r.is_none() {
@@ -353,11 +353,15 @@ struct Handshake {
 
 impl Handshake {
     fn new(info_hash: &[u8; 20]) -> Handshake {
+        let version = str::replace(env!("CARGO_PKG_VERSION"), ".", "");
         let mut arr = vec![19];
         arr.extend(b"BitTorrent protocol");
         arr.extend([0, 0, 0, 0, 0, 0, 0, 0]);
         arr.extend(info_hash);
-        arr.extend(b"-tT0030-");
+        arr.extend(b"-tT");
+        arr.extend(version.as_bytes());
+        arr.extend(b"R-");
+
         let random_id: [u8; 12] = (0..12)
             .map(|_| rand::thread_rng().gen_range(48..58))
             .collect::<Vec<u8>>()
