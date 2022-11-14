@@ -1,5 +1,6 @@
 use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
 use bendy::encoding::{AsString, Error as EncodeError, SingleItemEncoder, ToBencode};
+use magnet_url::Magnet;
 use sha1::{Digest, Sha1};
 use std::fmt;
 use std::fmt::Write;
@@ -15,6 +16,12 @@ pub struct TorrentFile {
     pub created: Option<String>,
     pub encoding: Option<String>,
 }
+
+// impl TorrentFile {
+//     fn from_magnet_link(magnet: Magnet) -> Self {
+
+//     }
+// }
 
 impl FromBencode for TorrentFile {
     //const EXPECTED_RECURSION_DEPTH: usize = 1;

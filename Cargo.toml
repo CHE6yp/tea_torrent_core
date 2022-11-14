@@ -13,3 +13,4 @@ dirs = "^4.0"
 rand = "^0.8"
 clap = { version = "3.2.7", features = ["derive"] }
 url = "2.3.1"
+magnet-url = "^2"
