@@ -291,7 +291,7 @@ impl std::fmt::Debug for ContentEvents {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Piece {
     pub number: u32,
-    size: u32,
+    pub size: u32,
     offset: usize,
     pub status: PieceStatus,
     hash: [u8; 20],

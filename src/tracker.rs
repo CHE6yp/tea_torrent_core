@@ -1,3 +1,4 @@
+use crate::{Content, PieceStatus};
 use crate::TorrentFile;
 use bendy::decoding::{Error as DecodeError, FromBencode, Object, ResultExt};
 use std::net::SocketAddr;
@@ -64,15 +65,26 @@ impl FromBencode for TrackerResponse {
     }
 }
 
-pub fn connect_to_tracker(tf: &TorrentFile) -> Option<TrackerResponse> {
-    let conn = |tracker: &str, info_hash: &str, length: usize| -> (u16, Vec<String>, Vec<u8>) {
+pub fn connect_to_tracker(tf: &TorrentFile, content: &Content) -> Option<TrackerResponse> {
+    let conn = |tracker: &str, info_hash: &str| -> (u16, Vec<String>, Vec<u8>) {
+        let mut left = 0;
+        let mut downloaded = 0;
+        for p in &content.pieces {
+            let piece = p.lock().unwrap();
+            match piece.status {
+                PieceStatus::Available => downloaded += piece.size,
+                _ => left += piece.size,
+            }
+        }
         println!("Connecting to tracker {:?}", tracker);
-        let url = format!("{}{}info_hash={}&port=50658&uploaded=0&downloaded=0&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
+        let url = format!("{}{}info_hash={}&port=50658&uploaded=0&downloaded={}&left={}&corrupt=0&key=CFA4D362&event=started&numwant=200&compact=1&no_peer_id=1",
             tracker,
             if tracker.contains('?') {"&"} else {"?"},
             info_hash,
-            length
+            downloaded,
+            left
         );
+        println!("{:?}", url);
 
         http::get(&url)
     };
@@ -92,7 +104,6 @@ pub fn connect_to_tracker(tf: &TorrentFile) -> Option<TrackerResponse> {
                 result = conn(
                     tracker,
                     &tf.info_hash.as_string_url_encoded(),
-                    tf.info.length,
                 );
                 match to_tracker_response(result.2) {
                     Ok(r) => return Some(r),
@@ -104,7 +115,6 @@ pub fn connect_to_tracker(tf: &TorrentFile) -> Option<TrackerResponse> {
         result = conn(
             &tf.announce,
             &tf.info_hash.as_string_url_encoded(),
-            tf.info.length,
         );
         match to_tracker_response(result.2) {
             Ok(r) => return Some(r),
